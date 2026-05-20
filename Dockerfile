@@ -5,7 +5,7 @@ ENV TZ=Asia/Shanghai
 
 COPY ./target/release/fns-cli /usr/local/bin/
 
-WORKDIR /app
+WORKDIR /service
 
 ENTRYPOINT ["fns-cli"]
 CMD ["-c", "/service/config.yaml", "run"]
