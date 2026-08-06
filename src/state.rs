@@ -43,15 +43,13 @@ impl SyncState {
             std::fs::create_dir_all(parent)?;
         }
 
-        let temp_file = NamedTempFile::new_in(
-            path.parent().unwrap_or_else(|| Path::new(".")),
-        )?;
+        let temp_file = NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
 
         serde_json::to_writer_pretty(&temp_file, self)?;
 
-        temp_file.persist(path).map_err(|e| {
-            crate::error::FnsError::Io { source: e.error }
-        })?;
+        temp_file
+            .persist(path)
+            .map_err(|e| crate::error::FnsError::Io { source: e.error })?;
 
         Ok(())
     }
@@ -108,7 +106,10 @@ mod tests {
 
         assert_eq!(loaded.last_note_sync_time, original.last_note_sync_time);
         assert_eq!(loaded.last_file_sync_time, original.last_file_sync_time);
-        assert_eq!(loaded.last_setting_sync_time, original.last_setting_sync_time);
+        assert_eq!(
+            loaded.last_setting_sync_time,
+            original.last_setting_sync_time
+        );
     }
 
     #[test]

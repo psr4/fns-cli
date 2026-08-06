@@ -76,7 +76,10 @@ fn default_file_chunk_size() -> usize {
 }
 
 fn default_config_sync_dirs() -> Vec<String> {
-    DEFAULT_CONFIG_SYNC_DIRS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_CONFIG_SYNC_DIRS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 impl Default for SyncConfig {
@@ -217,13 +220,17 @@ impl AppConfig {
 
         if config.server.api.is_empty() {
             return Err(FnsError::Config {
-                message: "server.api is required (set in config or via FNS_API environment variable)".to_string(),
+                message:
+                    "server.api is required (set in config or via FNS_API environment variable)"
+                        .to_string(),
             });
         }
 
         if config.server.token.is_empty() {
             return Err(FnsError::Config {
-                message: "server.token is required (set in config or via FNS_TOKEN environment variable)".to_string(),
+                message:
+                    "server.token is required (set in config or via FNS_TOKEN environment variable)"
+                        .to_string(),
             });
         }
 

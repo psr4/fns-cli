@@ -7,7 +7,7 @@
 
 use crate::protocol::Response;
 use reqwest::Client;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 /// HTTP client error types
@@ -50,7 +50,7 @@ impl HttpClient {
     /// Make a GET request and parse the response
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, FnsError> {
         let url = self.build_url(path);
-        
+
         let response = self
             .client
             .get(&url)
@@ -69,7 +69,7 @@ impl HttpClient {
         body: &T,
     ) -> Result<R, FnsError> {
         let url = self.build_url(path);
-        
+
         let response = self
             .client
             .post(&url)
@@ -101,12 +101,18 @@ mod tests {
     #[test]
     fn test_build_url() {
         let client = HttpClient::new("http://localhost:9000/api", "test-token");
-        assert_eq!(client.build_url("/user/info"), "http://localhost:9000/api/user/info");
+        assert_eq!(
+            client.build_url("/user/info"),
+            "http://localhost:9000/api/user/info"
+        );
     }
 
     #[test]
     fn test_build_url_trailing_slash() {
         let client = HttpClient::new("http://localhost:9000/api/", "test-token");
-        assert_eq!(client.build_url("/user/info"), "http://localhost:9000/api/user/info");
+        assert_eq!(
+            client.build_url("/user/info"),
+            "http://localhost:9000/api/user/info"
+        );
     }
 }

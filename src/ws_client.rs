@@ -12,13 +12,15 @@
 use crate::config::{AppConfig, ClientConfig, ServerConfig};
 use crate::error::FnsError;
 use crate::protocol::{
-    decode_message, encode_simple_message, Action, ClientAction, Response, SEPARATOR,
+    Action, ClientAction, Response, SEPARATOR, decode_message, encode_simple_message,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream};
+use tokio::time::{Duration, sleep};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
+};
 use tracing::{debug, error, info, warn};
 
 /// Maximum WebSocket message size (128MB)
@@ -139,11 +141,9 @@ impl WsClient {
 
         // Connect with tokio-tungstenite
         // NO client-side ping/pong - server sends pings, client auto-replies with pong
-        let (ws_stream, _) = connect_async(&url)
-            .await
-            .map_err(|e| FnsError::WebSocket {
-                message: format!("Failed to connect to {}: {}", url, e),
-            })?;
+        let (ws_stream, _) = connect_async(&url).await.map_err(|e| FnsError::WebSocket {
+            message: format!("Failed to connect to {}: {}", url, e),
+        })?;
 
         info!("WebSocket connected");
         Ok(ws_stream)
@@ -153,17 +153,14 @@ impl WsClient {
     ///
     /// Sends `Authorization|"token"` and waits for response.
     /// Success codes: 1 or 200.
-    pub async fn authenticate(
-        &mut self,
-        ws: &mut WsStream,
-    ) -> Result<(), FnsError> {
+    pub async fn authenticate(&mut self, ws: &mut WsStream) -> Result<(), FnsError> {
         // Send authorization message
         let auth_msg = encode_simple_message(
             &Action::Client(ClientAction::Authorization),
             &self.config.token,
         );
-        
-        debug!(msg = %auth_msg, "Sending authorization");
+
+        debug!("Sending authorization");
         ws.send(Message::Text(auth_msg.into()))
             .await
             .map_err(|e| FnsError::WebSocket {
@@ -183,10 +180,9 @@ impl WsClient {
 
         match response {
             Message::Text(text) => {
-                let (action, data) = decode_message(&text)
-                    .map_err(|e| FnsError::Protocol {
-                        message: format!("Failed to decode auth response: {}", e),
-                    })?;
+                let (action, data) = decode_message(&text).map_err(|e| FnsError::Protocol {
+                    message: format!("Failed to decode auth response: {}", e),
+                })?;
 
                 debug!(action = ?action, "Received auth response");
 
@@ -198,8 +194,8 @@ impl WsClient {
                 }
 
                 // Parse response to check code
-                let response: Response = serde_json::from_value(data.clone())
-                    .map_err(|e| FnsError::Protocol {
+                let response: Response =
+                    serde_json::from_value(data.clone()).map_err(|e| FnsError::Protocol {
                         message: format!("Failed to parse auth response: {}", e),
                     })?;
 
@@ -437,13 +433,13 @@ mod tests {
 
         // First attempt: base delay
         assert_eq!(client.calculate_delay(1), Duration::from_secs(3));
-        
+
         // Second attempt: base * 2
         assert_eq!(client.calculate_delay(2), Duration::from_secs(6));
-        
+
         // Third attempt: base * 4
         assert_eq!(client.calculate_delay(3), Duration::from_secs(12));
-        
+
         // Large attempt should cap at MAX_RECONNECT_DELAY_SECS (300)
         assert_eq!(client.calculate_delay(100), Duration::from_secs(300));
     }
@@ -456,7 +452,10 @@ mod tests {
         client.connect_count = 1;
 
         let url = client.build_url();
-        assert_eq!(url, "wss://server.example.com/api/user/sync?lang=zh-cn&count=1");
+        assert_eq!(
+            url,
+            "wss://server.example.com/api/user/sync?lang=zh-cn&count=1"
+        );
     }
 
     #[test]
@@ -478,7 +477,10 @@ mod tests {
         client.connect_count = 1;
 
         let url = client.build_url();
-        assert_eq!(url, "wss://server.example.com/api/user/sync?lang=zh-cn&count=1");
+        assert_eq!(
+            url,
+            "wss://server.example.com/api/user/sync?lang=zh-cn&count=1"
+        );
     }
 
     #[test]

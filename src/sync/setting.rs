@@ -6,21 +6,17 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracing::{debug, info, warn};
 use futures_util::SinkExt;
 use tokio_tungstenite::tungstenite::protocol::Message;
+use tracing::{debug, info, warn};
 
 use crate::error::FnsError;
 use crate::hash::{hash_content, hash_path};
-use crate::protocol::{
-    Action, ClientAction,
-    SettingSyncRequest, SettingSyncCheck,
-    encode_message,
-};
+use crate::protocol::{Action, ClientAction, SettingSyncCheck, SettingSyncRequest, encode_message};
 use crate::ws_client::WsStream;
 
 /// Marker for deleted files in echo cache
@@ -28,12 +24,9 @@ const DELETED_MARKER: &str = "__deleted__";
 
 /// Binary file extensions to skip during sync
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg",
-    "woff", "woff2", "ttf", "eot", "otf",
-    "pdf", "zip", "tar", "gz", "rar", "7z",
-    "mp3", "mp4", "wav", "avi", "mov", "mkv",
-    "exe", "dll", "so", "dylib",
-    "db", "sqlite", "sqlite3",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "woff", "woff2", "ttf", "eot", "otf", "pdf",
+    "zip", "tar", "gz", "rar", "7z", "mp3", "mp4", "wav", "avi", "mov", "mkv", "exe", "dll", "so",
+    "dylib", "db", "sqlite", "sqlite3",
 ];
 
 /// Setting sync engine
@@ -106,10 +99,10 @@ impl SettingSync {
         last_sync_time: i64,
     ) -> Result<(), FnsError> {
         self.reset_counters();
-        
+
         let settings = self.collect_local_settings()?;
         let context = uuid::Uuid::new_v4().to_string();
-        
+
         let request = SettingSyncRequest {
             vault: self.vault.clone(),
             last_time: last_sync_time,
@@ -119,23 +112,28 @@ impl SettingSync {
         };
 
         let msg = encode_message(&Action::Client(ClientAction::SettingSync), &request)?;
-        info!(last_time = last_sync_time, settings_count = request.settings.len(), "Requesting SettingSync");
-        
-        ws.send(Message::Text(msg.into())).await
+        info!(
+            last_time = last_sync_time,
+            settings_count = request.settings.len(),
+            "Requesting SettingSync"
+        );
+
+        ws.send(Message::Text(msg.into()))
+            .await
             .map_err(|e| FnsError::WebSocket {
                 message: format!("Failed to send SettingSync: {}", e),
             })?;
-        
+
         Ok(())
     }
 
     /// Send full sync request (lastTime = 0)
     pub async fn request_full_sync(&mut self, ws: &mut WsStream) -> Result<(), FnsError> {
         self.reset_counters();
-        
+
         let settings = self.collect_local_settings()?;
         let context = uuid::Uuid::new_v4().to_string();
-        
+
         let request = SettingSyncRequest {
             vault: self.vault.clone(),
             last_time: 0,
@@ -145,13 +143,17 @@ impl SettingSync {
         };
 
         let msg = encode_message(&Action::Client(ClientAction::SettingSync), &request)?;
-        info!(settings_count = request.settings.len(), "Requesting full SettingSync");
-        
-        ws.send(Message::Text(msg.into())).await
+        info!(
+            settings_count = request.settings.len(),
+            "Requesting full SettingSync"
+        );
+
+        ws.send(Message::Text(msg.into()))
+            .await
             .map_err(|e| FnsError::WebSocket {
                 message: format!("Failed to send full SettingSync: {}", e),
             })?;
-        
+
         Ok(())
     }
 
@@ -163,7 +165,7 @@ impl SettingSync {
         force: bool,
     ) -> Result<(), FnsError> {
         let full_path = self.vault_path.join(rel_path);
-        
+
         if !full_path.exists() {
             return Ok(());
         }
@@ -182,7 +184,7 @@ impl SettingSync {
         };
 
         let content_hash = hash_content(&content);
-        
+
         // Echo suppression: skip if we've already pushed this content (unless forced)
         if !force && self.echo_hashes.get(rel_path) == Some(&content_hash) {
             debug!(path = rel_path, "Skipping echo for setting modify");
@@ -190,12 +192,14 @@ impl SettingSync {
         }
 
         let metadata = fs::metadata(&full_path)?;
-        let ctime = metadata.created()
+        let ctime = metadata
+            .created()
             .unwrap_or(SystemTime::UNIX_EPOCH)
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        let mtime = metadata.modified()
+        let mtime = metadata
+            .modified()
             .unwrap_or(SystemTime::UNIX_EPOCH)
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -213,23 +217,20 @@ impl SettingSync {
 
         let msg = encode_message(&Action::Client(ClientAction::SettingModify), &request)?;
         info!(path = rel_path, "SettingModify -> server");
-        
-        ws.send(Message::Text(msg.into())).await
+
+        ws.send(Message::Text(msg.into()))
+            .await
             .map_err(|e| FnsError::WebSocket {
                 message: format!("Failed to send SettingModify: {}", e),
             })?;
-        
+
         self.echo_hashes.insert(rel_path.to_string(), content_hash);
-        
+
         Ok(())
     }
 
     /// Push a setting deletion to server
-    pub async fn push_delete(
-        &mut self,
-        ws: &mut WsStream,
-        rel_path: &str,
-    ) -> Result<(), FnsError> {
+    pub async fn push_delete(&mut self, ws: &mut WsStream, rel_path: &str) -> Result<(), FnsError> {
         self.echo_hashes.remove(rel_path);
 
         let request = serde_json::json!({
@@ -240,14 +241,16 @@ impl SettingSync {
 
         let msg = encode_message(&Action::Client(ClientAction::SettingDelete), &request)?;
         info!(path = rel_path, "SettingDelete -> server");
-        
-        ws.send(Message::Text(msg.into())).await
+
+        ws.send(Message::Text(msg.into()))
+            .await
             .map_err(|e| FnsError::WebSocket {
                 message: format!("Failed to send SettingDelete: {}", e),
             })?;
-        
-        self.echo_hashes.insert(rel_path.to_string(), DELETED_MARKER.to_string());
-        
+
+        self.echo_hashes
+            .insert(rel_path.to_string(), DELETED_MARKER.to_string());
+
         Ok(())
     }
 
@@ -266,20 +269,20 @@ impl SettingSync {
     /// Handle SettingSyncModify message from server
     pub fn handle_setting_modify(&mut self, msg: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg);
-        
-        let rel_path: String = data.get("path")
+
+        let rel_path: String = data
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        
-        let content: String = data.get("content")
+
+        let content: String = data
+            .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        
-        let mtime: i64 = data.get("mtime")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+
+        let mtime: i64 = data.get("mtime").and_then(|v| v.as_i64()).unwrap_or(0);
 
         if rel_path.is_empty() {
             return Ok(());
@@ -291,36 +294,39 @@ impl SettingSync {
         }
 
         let full_path = self.vault_path.join(&rel_path);
-        
+
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         fs::write(&full_path, &content)?;
-        
+
         if mtime > 0 {
             let ts = UNIX_EPOCH + std::time::Duration::from_millis(mtime as u64);
-            if let Err(e) = filetime::set_file_mtime(&full_path, filetime::FileTime::from_system_time(ts)) {
+            if let Err(e) =
+                filetime::set_file_mtime(&full_path, filetime::FileTime::from_system_time(ts))
+            {
                 warn!(path = rel_path, error = %e, "Failed to set mtime");
             }
         }
 
         let content_hash = hash_content(&content);
         self.echo_hashes.insert(rel_path.clone(), content_hash);
-        
+
         info!(path = rel_path, "<- SettingSyncModify");
-        
+
         self.received_modify += 1;
         self.check_all_received();
-        
+
         Ok(())
     }
 
     /// Handle SettingSyncDelete message from server
     pub fn handle_setting_delete(&mut self, msg: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg);
-        
-        let rel_path: String = data.get("path")
+
+        let rel_path: String = data
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
@@ -337,31 +343,34 @@ impl SettingSync {
         }
 
         let full_path = self.vault_path.join(&rel_path);
-        
+
         if full_path.exists() {
             fs::remove_file(&full_path)?;
             info!(path = rel_path, "<- SettingSyncDelete applied");
             self.try_remove_empty_parent(&full_path);
         }
-        
-        self.echo_hashes.insert(rel_path, DELETED_MARKER.to_string());
-        
+
+        self.echo_hashes
+            .insert(rel_path, DELETED_MARKER.to_string());
+
         self.received_delete += 1;
         self.check_all_received();
-        
+
         Ok(())
     }
 
     /// Handle SettingSyncRename message from server
     pub fn handle_setting_rename(&mut self, msg: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg);
-        
-        let old_path: String = data.get("oldPath")
+
+        let old_path: String = data
+            .get("oldPath")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        
-        let new_path: String = data.get("path")
+
+        let new_path: String = data
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
@@ -371,19 +380,24 @@ impl SettingSync {
         }
 
         // Mark old path as deleted in echo cache
-        self.echo_hashes.insert(old_path.clone(), DELETED_MARKER.to_string());
+        self.echo_hashes
+            .insert(old_path.clone(), DELETED_MARKER.to_string());
 
         let old_full = self.vault_path.join(&old_path);
         let new_full = self.vault_path.join(&new_path);
-        
+
         if old_full.exists() {
             if let Some(parent) = new_full.parent() {
                 fs::create_dir_all(parent)?;
             }
-            
+
             fs::rename(&old_full, &new_full)?;
-            info!(old_path = old_path, new_path = new_path, "<- SettingSyncRename");
-            
+            info!(
+                old_path = old_path,
+                new_path = new_path,
+                "<- SettingSyncRename"
+            );
+
             // Read renamed file to update content hash in echo cache
             if new_full.exists() {
                 if let Ok(content) = fs::read_to_string(&new_full) {
@@ -391,39 +405,40 @@ impl SettingSync {
                     self.echo_hashes.insert(new_path.clone(), content_hash);
                 }
             }
-            
+
             self.try_remove_empty_parent(&old_full);
         }
-        
+
         Ok(())
     }
 
     /// Handle SettingSyncMtime message from server
     pub fn handle_setting_mtime(&mut self, msg: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg);
-        
-        let rel_path: String = data.get("path")
+
+        let rel_path: String = data
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        
-        let mtime: i64 = data.get("mtime")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+
+        let mtime: i64 = data.get("mtime").and_then(|v| v.as_i64()).unwrap_or(0);
 
         if rel_path.is_empty() || mtime == 0 {
             return Ok(());
         }
 
         let full_path = self.vault_path.join(&rel_path);
-        
+
         if full_path.exists() {
             let ts = UNIX_EPOCH + std::time::Duration::from_millis(mtime as u64);
-            if let Err(e) = filetime::set_file_mtime(&full_path, filetime::FileTime::from_system_time(ts)) {
+            if let Err(e) =
+                filetime::set_file_mtime(&full_path, filetime::FileTime::from_system_time(ts))
+            {
                 warn!(path = rel_path, error = %e, "Failed to set mtime");
             }
         }
-        
+
         Ok(())
     }
 
@@ -434,14 +449,15 @@ impl SettingSync {
         msg: &serde_json::Value,
     ) -> Result<(), FnsError> {
         let data = extract_inner(msg);
-        
-        let need_upload = data.get("needUpload")
+
+        let need_upload = data
+            .get("needUpload")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
 
         info!(count = need_upload.len(), "<- SettingSyncNeedUpload");
-        
+
         for item in need_upload {
             let rel_path = if let Some(obj) = item.as_object() {
                 obj.get("path")
@@ -449,17 +465,15 @@ impl SettingSync {
                     .unwrap_or_default()
                     .to_string()
             } else {
-                item.as_str()
-                    .unwrap_or_default()
-                    .to_string()
+                item.as_str().unwrap_or_default().to_string()
             };
-            
+
             if !rel_path.is_empty() {
                 self.push_modify(ws, &rel_path, false).await?;
                 self.received_upload += 1;
             }
         }
-        
+
         self.check_all_received();
         Ok(())
     }
@@ -467,20 +481,21 @@ impl SettingSync {
     /// Handle SettingSyncEnd message from server
     pub fn handle_setting_end(&mut self, msg: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg);
-        
-        let last_time: i64 = data.get("lastTime")
+
+        let last_time: i64 = data.get("lastTime").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        let need_modify_count: i64 = data
+            .get("needModifyCount")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        
-        let need_modify_count: i64 = data.get("needModifyCount")
+
+        let need_delete_count: i64 = data
+            .get("needDeleteCount")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        
-        let need_delete_count: i64 = data.get("needDeleteCount")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        
-        let need_upload_count: i64 = data.get("needUploadCount")
+
+        let need_upload_count: i64 = data
+            .get("needUploadCount")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
@@ -504,7 +519,7 @@ impl SettingSync {
         } else {
             self.check_all_received();
         }
-        
+
         Ok(())
     }
 
@@ -526,7 +541,7 @@ impl SettingSync {
                 return false;
             }
         }
-        
+
         if path.exists() {
             if let Ok(mut file) = fs::File::open(path) {
                 let mut buffer = [0u8; 8192];
@@ -537,29 +552,29 @@ impl SettingSync {
                 }
             }
         }
-        
+
         true
     }
 
     /// Check if a relative path is a config path
     fn is_config_path(&self, rel: &str) -> bool {
         let first = rel.split('/').next().unwrap_or("");
-        
+
         if !first.starts_with('.') {
             return false;
         }
-        
+
         if self.config_dirs.contains(&first.to_string()) {
             return true;
         }
-        
+
         self.sync_config
     }
 
     /// Collect all local setting files
     fn collect_local_settings(&self) -> Result<Vec<SettingSyncCheck>, FnsError> {
         let mut settings = Vec::new();
-        
+
         if !self.vault_path.exists() {
             return Ok(settings);
         }
@@ -570,7 +585,7 @@ impl SettingSync {
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
-            
+
             if !path.is_file() {
                 continue;
             }
@@ -598,13 +613,14 @@ impl SettingSync {
             };
 
             let content_hash = hash_content(&String::from_utf8_lossy(&content));
-            
+
             let metadata = match fs::metadata(path) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
 
-            let mtime = metadata.modified()
+            let mtime = metadata
+                .modified()
                 .unwrap_or(SystemTime::UNIX_EPOCH)
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -655,10 +671,10 @@ impl SettingSync {
         if !self.got_end {
             return;
         }
-        
+
         let total_expected = self.expected_modify + self.expected_delete + self.expected_upload;
         let total_received = self.received_modify + self.received_delete + self.received_upload;
-        
+
         if total_received >= total_expected {
             info!(
                 modify = self.received_modify,
@@ -673,12 +689,12 @@ impl SettingSync {
     /// Try to remove empty parent directories
     fn try_remove_empty_parent(&self, file_path: &Path) {
         let mut parent = file_path.parent();
-        
+
         while let Some(p) = parent {
             if p == self.vault_path {
                 break;
             }
-            
+
             if p.exists() && p.is_dir() {
                 if let Ok(mut entries) = fs::read_dir(p) {
                     if entries.next().is_none() {
@@ -691,7 +707,7 @@ impl SettingSync {
                     }
                 }
             }
-            
+
             parent = p.parent();
         }
     }
@@ -710,7 +726,6 @@ fn extract_inner(msg_data: &serde_json::Value) -> &serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::tempdir;
 
     #[test]
@@ -779,36 +794,36 @@ mod tests {
     fn test_collect_local_settings() {
         let dir = tempdir().unwrap();
         let vault_path = dir.path().to_path_buf();
-        
+
         let obsidian = vault_path.join(".obsidian");
         fs::create_dir_all(&obsidian).unwrap();
         fs::write(obsidian.join("app.json"), r#"{"theme": "dark"}"#).unwrap();
         fs::write(obsidian.join("graph.json"), r##"{"color": "#fff"}"##).unwrap();
-        
+
         let agents = vault_path.join(".agents");
         fs::create_dir_all(&agents).unwrap();
         fs::write(agents.join("config.yaml"), "key: value").unwrap();
-        
+
         fs::write(vault_path.join("note.md"), "# Note").unwrap();
-        
+
         fs::write(obsidian.join("icon.png"), [0x89, 0x50, 0x4E, 0x47]).unwrap();
-        
+
         let sync = SettingSync::new(
             vault_path.clone(),
             vec![".obsidian".to_string(), ".agents".to_string()],
             false,
             "test".to_string(),
         );
-        
+
         let settings = sync.collect_local_settings().unwrap();
-        
+
         assert_eq!(settings.len(), 3);
-        
+
         let paths: Vec<&str> = settings.iter().map(|s| s.path.as_str()).collect();
         assert!(paths.contains(&".obsidian/app.json"));
         assert!(paths.contains(&".obsidian/graph.json"));
         assert!(paths.contains(&".agents/config.yaml"));
-        
+
         assert!(!paths.contains(&".obsidian/icon.png"));
         assert!(!paths.contains(&"note.md"));
     }
@@ -832,29 +847,30 @@ mod tests {
     fn test_echo_hashes_revert() {
         let dir = tempdir().unwrap();
         let vault_path = dir.path().to_path_buf();
-        
+
         let obsidian = vault_path.join(".obsidian");
         fs::create_dir_all(&obsidian).unwrap();
-        
+
         let file_path = obsidian.join("app.json");
         fs::write(&file_path, r#"{"theme": "dark"}"#).unwrap();
-        
+
         let mut sync = SettingSync::new(
             vault_path.clone(),
             vec![".obsidian".to_string()],
             false,
             "test".to_string(),
         );
-        
+
         // Simulate outbound push with hash_a
         let content_a = r#"{"theme": "dark"}"#;
         let hash_a = hash_content(content_a);
-        sync.echo_hashes.insert(".obsidian/app.json".to_string(), hash_a.clone());
-        
+        sync.echo_hashes
+            .insert(".obsidian/app.json".to_string(), hash_a.clone());
+
         // Server sends back different content (hash_b)
         let content_b = r#"{"theme": "light"}"#;
         let hash_b = hash_content(content_b);
-        
+
         let msg = serde_json::json!({
             "data": {
                 "path": ".obsidian/app.json",
@@ -863,10 +879,10 @@ mod tests {
             }
         });
         sync.handle_setting_modify(&msg).unwrap();
-        
+
         // Verify hash_b is now in echo_hashes (not hash_a)
         assert_eq!(sync.echo_hashes.get(".obsidian/app.json"), Some(&hash_b));
-        
+
         // Now simulate revert: server sends back hash_a
         let msg_revert = serde_json::json!({
             "data": {
@@ -876,11 +892,11 @@ mod tests {
             }
         });
         sync.handle_setting_modify(&msg_revert).unwrap();
-        
+
         // File should be written (not echo-suppressed) because hash_a != hash_b
         let written = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written, content_a);
-        
+
         // And echo_hashes should now have hash_a
         assert_eq!(sync.echo_hashes.get(".obsidian/app.json"), Some(&hash_a));
     }
@@ -889,20 +905,20 @@ mod tests {
     fn test_echo_hashes_tombstone_reuse() {
         let dir = tempdir().unwrap();
         let vault_path = dir.path().to_path_buf();
-        
+
         let obsidian = vault_path.join(".obsidian");
         fs::create_dir_all(&obsidian).unwrap();
-        
+
         let file_path = obsidian.join("app.json");
         fs::write(&file_path, r#"{"theme": "dark"}"#).unwrap();
-        
+
         let mut sync = SettingSync::new(
             vault_path.clone(),
             vec![".obsidian".to_string()],
             false,
             "test".to_string(),
         );
-        
+
         // Step 1: Inbound delete sets DELETED marker
         let msg_delete = serde_json::json!({
             "data": {
@@ -910,17 +926,17 @@ mod tests {
             }
         });
         sync.handle_setting_delete(&msg_delete).unwrap();
-        
+
         assert_eq!(
             sync.echo_hashes.get(".obsidian/app.json"),
             Some(&DELETED_MARKER.to_string())
         );
         assert!(!file_path.exists());
-        
+
         // Step 2: Recreate the file (simulating inbound modify)
         let content = r#"{"theme": "light"}"#;
         let hash = hash_content(content);
-        
+
         let msg_recreate = serde_json::json!({
             "data": {
                 "path": ".obsidian/app.json",
@@ -929,13 +945,13 @@ mod tests {
             }
         });
         sync.handle_setting_modify(&msg_recreate).unwrap();
-        
+
         assert_eq!(sync.echo_hashes.get(".obsidian/app.json"), Some(&hash));
         assert!(file_path.exists());
-        
+
         // Step 3: Another delete - should NOT be echo-suppressed
         sync.handle_setting_delete(&msg_delete).unwrap();
-        
+
         assert_eq!(
             sync.echo_hashes.get(".obsidian/app.json"),
             Some(&DELETED_MARKER.to_string())

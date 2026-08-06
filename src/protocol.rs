@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::fmt;
 
@@ -483,6 +483,7 @@ pub struct FileSyncCheck {
     #[serde(rename = "contentHash")]
     pub content_hash: String,
     pub size: i64,
+    pub ctime: i64,
     pub mtime: i64,
 }
 
@@ -687,20 +688,20 @@ pub struct SettingSyncEndMessage {
 pub fn build_binary_chunk(session_id: &str, chunk_index: u32, data: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(2 + SESSION_ID_LEN + CHUNK_INDEX_LEN + data.len());
     frame.extend_from_slice(&PREFIX_BC);
-    
+
     // Session ID: exactly 36 bytes, padded with null if shorter
     let sid_bytes = session_id.as_bytes();
     frame.extend_from_slice(&sid_bytes[..sid_bytes.len().min(SESSION_ID_LEN)]);
     if sid_bytes.len() < SESSION_ID_LEN {
         frame.extend(std::iter::repeat(0u8).take(SESSION_ID_LEN - sid_bytes.len()));
     }
-    
+
     // Chunk index: 4 bytes big-endian
     frame.extend_from_slice(&chunk_index.to_be_bytes());
-    
+
     // Payload
     frame.extend_from_slice(data);
-    
+
     frame
 }
 
@@ -713,21 +714,21 @@ pub fn parse_binary_chunk(raw: &[u8]) -> Result<(String, u32, &[u8]), String> {
             SESSION_ID_LEN + CHUNK_INDEX_LEN
         ));
     }
-    
+
     let sid = std::str::from_utf8(&raw[..SESSION_ID_LEN])
         .map_err(|e| format!("Invalid session ID: {}", e))?
         .trim_end_matches('\0')
         .to_string();
-    
+
     let chunk_index = u32::from_be_bytes([
         raw[SESSION_ID_LEN],
         raw[SESSION_ID_LEN + 1],
         raw[SESSION_ID_LEN + 2],
         raw[SESSION_ID_LEN + 3],
     ]);
-    
+
     let data = &raw[SESSION_ID_LEN + CHUNK_INDEX_LEN..];
-    
+
     Ok((sid, chunk_index, data))
 }
 
@@ -750,19 +751,19 @@ impl BinaryChunkBuilder {
             data: Vec::new(),
         }
     }
-    
+
     /// Set the chunk index
     pub fn chunk_index(mut self, index: u32) -> Self {
         self.chunk_index = index;
         self
     }
-    
+
     /// Set the payload data
     pub fn data(mut self, data: impl Into<Vec<u8>>) -> Self {
         self.data = data.into();
         self
     }
-    
+
     /// Build the binary frame
     pub fn build(&self) -> Vec<u8> {
         build_binary_chunk(&self.session_id, self.chunk_index, &self.data)
@@ -797,18 +798,18 @@ impl BinaryChunkParser {
                 &frame[..PREFIX_BC.len()]
             ));
         }
-        
+
         // Parse the rest (after prefix)
         let raw = &frame[PREFIX_BC.len()..];
         let (session_id, chunk_index, data) = parse_binary_chunk(raw)?;
-        
+
         Ok(ParsedChunk {
             session_id,
             chunk_index,
             data: data.to_vec(),
         })
     }
-    
+
     /// Check if a frame is a binary chunk (starts with prefix)
     pub fn is_binary_frame(data: &[u8]) -> bool {
         data.len() >= PREFIX_BC.len() && data[..PREFIX_BC.len()] == PREFIX_BC
@@ -840,7 +841,7 @@ impl ChunkReassembler {
             highest_index: 0,
         }
     }
-    
+
     /// Add a chunk to the reassembler
     /// Returns Ok(true) if this chunk completes the data
     pub fn add_chunk(&mut self, chunk: ParsedChunk) -> Result<bool, String> {
@@ -854,27 +855,27 @@ impl ChunkReassembler {
             }
             _ => {}
         }
-        
+
         // Set session ID if first chunk
         if self.session_id.is_none() {
             self.session_id = Some(chunk.session_id);
         }
-        
+
         // Track highest index
         self.highest_index = self.highest_index.max(chunk.chunk_index);
-        
+
         // Insert chunk (will overwrite duplicate indices)
         self.chunks.insert(chunk.chunk_index, chunk.data);
-        
+
         // Check if complete (all indices 0..=highest_index present)
         Ok(self.is_complete())
     }
-    
+
     /// Set expected chunk count (allows early completion detection)
     pub fn set_expected_count(&mut self, count: u32) {
         self.expected_count = Some(count);
     }
-    
+
     /// Check if all chunks have been received
     /// Requires `expected_count` to be set; without it, completeness cannot be determined
     pub fn is_complete(&self) -> bool {
@@ -883,17 +884,17 @@ impl ChunkReassembler {
             None => false,
         }
     }
-    
+
     /// Get the reassembled data
     /// Returns None if not all chunks received
     pub fn get_data(&self) -> Option<Vec<u8>> {
         if !self.is_complete() {
             return None;
         }
-        
+
         let count = self.expected_count?;
         let mut result = Vec::new();
-        
+
         for i in 0..count {
             if let Some(data) = self.chunks.get(&i) {
                 result.extend_from_slice(data);
@@ -901,31 +902,32 @@ impl ChunkReassembler {
                 return None;
             }
         }
-        
+
         Some(result)
     }
-    
+
     /// Get missing chunk indices
     pub fn missing_indices(&self) -> Vec<u32> {
-        let max_index = self.expected_count
+        let max_index = self
+            .expected_count
             .map(|c| c - 1)
             .unwrap_or(self.highest_index);
-        
+
         (0..=max_index)
             .filter(|i| !self.chunks.contains_key(i))
             .collect()
     }
-    
+
     /// Get current chunk count
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
     }
-    
+
     /// Get session ID
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
-    
+
     /// Reset the reassembler
     pub fn reset(&mut self) {
         self.session_id = None;
@@ -944,7 +946,10 @@ impl Default for ChunkReassembler {
 // ── Message encoding/decoding ───────────────────────────────────────────
 
 /// Encode a message to `ACTION|JSON` format
-pub fn encode_message<T: Serialize>(action: &Action, payload: &T) -> Result<String, serde_json::Error> {
+pub fn encode_message<T: Serialize>(
+    action: &Action,
+    payload: &T,
+) -> Result<String, serde_json::Error> {
     let json = serde_json::to_string(payload)?;
     Ok(format!("{}{}{}", action, SEPARATOR, json))
 }
@@ -957,17 +962,17 @@ pub fn encode_simple_message(action: &Action, payload: &str) -> String {
 /// Decode a message from `ACTION|JSON` format
 pub fn decode_message(text: &str) -> Result<(Action, Value), String> {
     let idx = text.find(SEPARATOR);
-    
+
     let (action_str, json_str) = match idx {
         Some(i) => (&text[..i], &text[i + SEPARATOR.len()..]),
         None => (text, "{}"),
     };
-    
+
     let action: Action = action_str.parse()?;
-    
-    let data = serde_json::from_str(json_str)
-        .unwrap_or_else(|_| Value::String(json_str.to_string()));
-    
+
+    let data =
+        serde_json::from_str(json_str).unwrap_or_else(|_| Value::String(json_str.to_string()));
+
     Ok((action, data))
 }
 
@@ -1002,13 +1007,13 @@ mod tests {
         let session_id = "abc123-def456-ghi789";
         let chunk_index = 42u32;
         let data = b"hello world";
-        
+
         let frame = build_binary_chunk(session_id, chunk_index, data);
-        
+
         // Skip the prefix for parsing
         let raw = &frame[2..];
         let (sid, idx, payload) = parse_binary_chunk(raw).unwrap();
-        
+
         assert_eq!(sid, session_id);
         assert_eq!(idx, chunk_index);
         assert_eq!(payload, data);
@@ -1022,9 +1027,9 @@ mod tests {
             .chunk_index(5)
             .data(b"test payload")
             .build();
-        
+
         assert!(BinaryChunkParser::is_binary_frame(&frame));
-        
+
         let parsed = BinaryChunkParser::parse(&frame).unwrap();
         assert_eq!(parsed.session_id, "test-session-id");
         assert_eq!(parsed.chunk_index, 5);
@@ -1037,7 +1042,7 @@ mod tests {
             .chunk_index(0)
             .data(&[][..])
             .build();
-        
+
         let parsed = BinaryChunkParser::parse(&frame).unwrap();
         assert_eq!(parsed.data, Vec::<u8>::new());
     }
@@ -1050,7 +1055,7 @@ mod tests {
             .chunk_index(0)
             .data(b"x")
             .build();
-        
+
         let parsed = BinaryChunkParser::parse(&frame).unwrap();
         assert_eq!(parsed.session_id, short_id);
     }
@@ -1063,7 +1068,7 @@ mod tests {
             .chunk_index(0)
             .data(b"x")
             .build();
-        
+
         let parsed = BinaryChunkParser::parse(&frame).unwrap();
         assert_eq!(parsed.session_id.len(), 36);
         assert!(long_id.starts_with(&parsed.session_id));
@@ -1091,7 +1096,7 @@ mod tests {
     fn test_parser_is_binary_frame() {
         let binary = vec![b'0', b'0', 0x01, 0x02];
         let text = b"Hello|{}";
-        
+
         assert!(BinaryChunkParser::is_binary_frame(&binary));
         assert!(!BinaryChunkParser::is_binary_frame(text));
     }
@@ -1103,7 +1108,7 @@ mod tests {
             .chunk_index(123)
             .data(data.clone())
             .build();
-        
+
         let parsed = BinaryChunkParser::parse(&frame).unwrap();
         assert_eq!(parsed.data, data);
     }
@@ -1114,16 +1119,16 @@ mod tests {
     fn test_reassembler_single_chunk() {
         let mut reassembler = ChunkReassembler::new();
         reassembler.set_expected_count(1);
-        
+
         let chunk = ParsedChunk {
             session_id: "test-session".to_string(),
             chunk_index: 0,
             data: vec![1, 2, 3, 4],
         };
-        
+
         let complete = reassembler.add_chunk(chunk).unwrap();
         assert!(complete);
-        
+
         let data = reassembler.get_data().unwrap();
         assert_eq!(data, vec![1, 2, 3, 4]);
     }
@@ -1132,7 +1137,7 @@ mod tests {
     fn test_reassembler_multiple_chunks() {
         let mut reassembler = ChunkReassembler::new();
         reassembler.set_expected_count(3);
-        
+
         let chunk0 = ParsedChunk {
             session_id: "session".to_string(),
             chunk_index: 0,
@@ -1148,11 +1153,11 @@ mod tests {
             chunk_index: 2,
             data: vec![5, 6],
         };
-        
+
         assert!(!reassembler.add_chunk(chunk0).unwrap());
         assert!(!reassembler.add_chunk(chunk1).unwrap());
         assert!(reassembler.add_chunk(chunk2).unwrap());
-        
+
         let data = reassembler.get_data().unwrap();
         assert_eq!(data, vec![1, 2, 3, 4, 5, 6]);
     }
@@ -1161,7 +1166,7 @@ mod tests {
     fn test_reassembler_out_of_order() {
         let mut reassembler = ChunkReassembler::new();
         reassembler.set_expected_count(3);
-        
+
         let chunk2 = ParsedChunk {
             session_id: "session".to_string(),
             chunk_index: 2,
@@ -1177,11 +1182,11 @@ mod tests {
             chunk_index: 1,
             data: vec![3, 4],
         };
-        
+
         reassembler.add_chunk(chunk2).unwrap();
         reassembler.add_chunk(chunk0).unwrap();
         let complete = reassembler.add_chunk(chunk1).unwrap();
-        
+
         assert!(complete);
         let data = reassembler.get_data().unwrap();
         assert_eq!(data, vec![1, 2, 3, 4, 5, 6]);
@@ -1190,7 +1195,7 @@ mod tests {
     #[test]
     fn test_reassembler_session_mismatch() {
         let mut reassembler = ChunkReassembler::new();
-        
+
         let chunk1 = ParsedChunk {
             session_id: "session-a".to_string(),
             chunk_index: 0,
@@ -1201,7 +1206,7 @@ mod tests {
             chunk_index: 1,
             data: vec![2],
         };
-        
+
         reassembler.add_chunk(chunk1).unwrap();
         let result = reassembler.add_chunk(chunk2);
         assert!(result.is_err());
@@ -1212,7 +1217,7 @@ mod tests {
     fn test_reassembler_expected_count() {
         let mut reassembler = ChunkReassembler::new();
         reassembler.set_expected_count(3);
-        
+
         let chunk0 = ParsedChunk {
             session_id: "session".to_string(),
             chunk_index: 0,
@@ -1228,7 +1233,7 @@ mod tests {
             chunk_index: 2,
             data: vec![3],
         };
-        
+
         reassembler.add_chunk(chunk0).unwrap();
         reassembler.add_chunk(chunk1).unwrap();
         assert!(reassembler.add_chunk(chunk2).unwrap());
@@ -1237,7 +1242,7 @@ mod tests {
     #[test]
     fn test_reassembler_missing_indices() {
         let mut reassembler = ChunkReassembler::new();
-        
+
         let chunk0 = ParsedChunk {
             session_id: "session".to_string(),
             chunk_index: 0,
@@ -1248,10 +1253,10 @@ mod tests {
             chunk_index: 2,
             data: vec![3],
         };
-        
+
         reassembler.add_chunk(chunk0).unwrap();
         reassembler.add_chunk(chunk2).unwrap();
-        
+
         let missing = reassembler.missing_indices();
         assert_eq!(missing, vec![1]);
     }
@@ -1260,16 +1265,16 @@ mod tests {
     fn test_reassembler_reset() {
         let mut reassembler = ChunkReassembler::new();
         reassembler.set_expected_count(1);
-        
+
         let chunk = ParsedChunk {
             session_id: "session".to_string(),
             chunk_index: 0,
             data: vec![1, 2, 3],
         };
-        
+
         reassembler.add_chunk(chunk).unwrap();
         assert!(reassembler.is_complete());
-        
+
         reassembler.reset();
         assert!(!reassembler.is_complete());
         assert_eq!(reassembler.chunk_count(), 0);
@@ -1280,7 +1285,7 @@ mod tests {
     fn test_reassembler_duplicate_chunk() {
         let mut reassembler = ChunkReassembler::new();
         reassembler.set_expected_count(1);
-        
+
         let chunk1 = ParsedChunk {
             session_id: "session".to_string(),
             chunk_index: 0,
@@ -1291,10 +1296,10 @@ mod tests {
             chunk_index: 0,
             data: vec![3, 4],
         };
-        
+
         reassembler.add_chunk(chunk1).unwrap();
         reassembler.add_chunk(chunk2).unwrap();
-        
+
         // Second chunk should overwrite first
         let data = reassembler.get_data().unwrap();
         assert_eq!(data, vec![3, 4]);
@@ -1306,7 +1311,7 @@ mod tests {
     fn test_full_roundtrip_with_reassembler() {
         let session_id = "integration-test-session-id";
         let original_data: Vec<u8> = (0..=255).cycle().take(5000).collect();
-        
+
         // Split into chunks
         let chunk_size = 1000;
         let chunks: Vec<_> = original_data
@@ -1319,16 +1324,16 @@ mod tests {
                     .build()
             })
             .collect();
-        
+
         // Reassemble
         let mut reassembler = ChunkReassembler::new();
         reassembler.set_expected_count(chunks.len() as u32);
-        
+
         for frame in &chunks {
             let parsed = BinaryChunkParser::parse(frame).unwrap();
             reassembler.add_chunk(parsed).unwrap();
         }
-        
+
         let reassembled = reassembler.get_data().unwrap();
         assert_eq!(reassembled, original_data);
     }

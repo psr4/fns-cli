@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::AppConfig;
 use crate::error::FnsError;
-use crate::protocol::{decode_message, Action, ServerAction};
+use crate::protocol::{Action, ServerAction, decode_message};
 use crate::state::SyncState;
 use crate::ws_client::{WsClient, WsStream};
 
@@ -334,9 +334,9 @@ impl SyncCoordinator {
     /// Run note sync (incremental)
     async fn run_note_sync(&mut self, ws: &mut WsStream) -> Result<usize, FnsError> {
         let last_time = self.state.last_note_sync_time;
-        
+
         info!(last_time = last_time, "Starting note sync");
-        
+
         self.note_sync.sync_incremental(ws, last_time).await?;
 
         let pending = self.note_sync.pending_last_time();
@@ -349,7 +349,10 @@ impl SyncCoordinator {
 
     /// Run file sync
     async fn run_file_sync(&mut self, ws: &mut WsStream) -> Result<usize, FnsError> {
-        info!(last_time = self.state.last_file_sync_time, "Starting file sync");
+        info!(
+            last_time = self.state.last_file_sync_time,
+            "Starting file sync"
+        );
 
         let state = self.state.clone();
         {
@@ -400,7 +403,7 @@ impl SyncCoordinator {
                     if let Action::Server(server_action) = action {
                         let mut file_sync = self.file_sync.lock().await;
                         let is_end = file_sync.handle_message(ws, &server_action, data).await?;
-                        
+
                         if is_end {
                             return Ok(());
                         }
@@ -423,9 +426,9 @@ impl SyncCoordinator {
     /// Run setting sync
     async fn run_setting_sync(&mut self, ws: &mut WsStream) -> Result<usize, FnsError> {
         let last_time = self.state.last_setting_sync_time;
-        
+
         info!(last_time = last_time, "Starting setting sync");
-        
+
         self.setting_sync.request_sync(ws, last_time).await?;
 
         self.process_setting_sync_messages(ws).await?;
@@ -470,7 +473,8 @@ impl SyncCoordinator {
                     })?;
 
                     if let Action::Server(server_action) = action {
-                        self.handle_setting_message(ws, &server_action, data).await?;
+                        self.handle_setting_message(ws, &server_action, data)
+                            .await?;
                     }
                 }
                 Message::Binary(data) => {
@@ -508,13 +512,23 @@ impl SyncCoordinator {
                 self.setting_sync.handle_setting_mtime(&data)?;
             }
             ServerAction::SettingSyncNeedUpload => {
-                self.setting_sync.handle_setting_need_upload(ws, &data).await?;
+                self.setting_sync
+                    .handle_setting_need_upload(ws, &data)
+                    .await?;
             }
             ServerAction::SettingSyncEnd => {
                 self.setting_sync.handle_setting_end(&data)?;
             }
             _ => {
-                if matches!(action, ServerAction::FileUpload | ServerAction::FileUploadAck | ServerAction::FileDeleteAck | ServerAction::FileSyncUpdate | ServerAction::FileSyncMtime | ServerAction::FileSyncChunkDownload) {
+                if matches!(
+                    action,
+                    ServerAction::FileUpload
+                        | ServerAction::FileUploadAck
+                        | ServerAction::FileDeleteAck
+                        | ServerAction::FileSyncUpdate
+                        | ServerAction::FileSyncMtime
+                        | ServerAction::FileSyncChunkDownload
+                ) {
                     debug!("Handling file message during setting sync: {:?}", action);
                     let mut file_sync = self.file_sync.lock().await;
                     match action {
@@ -561,7 +575,7 @@ impl SyncCoordinator {
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
-            
+
             if !path.is_file() {
                 continue;
             }
@@ -607,11 +621,11 @@ impl SyncCoordinator {
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
-            
+
             if !path.is_file() {
                 continue;
             }
-            
+
             let rel = match path.strip_prefix(&vault_path) {
                 Ok(r) => r.to_string_lossy().to_string(),
                 Err(_) => continue,
@@ -621,7 +635,12 @@ impl SyncCoordinator {
                 continue;
             }
 
-            if rel.split('/').next().map(|s| s.starts_with('.')).unwrap_or(false) {
+            if rel
+                .split('/')
+                .next()
+                .map(|s| s.starts_with('.'))
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -654,11 +673,11 @@ impl SyncCoordinator {
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
-            
+
             if !path.is_file() {
                 continue;
             }
-            
+
             let rel = match path.strip_prefix(&vault_path) {
                 Ok(r) => r.to_string_lossy().to_string(),
                 Err(_) => continue,
@@ -669,7 +688,12 @@ impl SyncCoordinator {
                 continue;
             }
 
-            if !self.config.sync.config_sync_dirs.contains(&first.to_string()) {
+            if !self
+                .config
+                .sync
+                .config_sync_dirs
+                .contains(&first.to_string())
+            {
                 continue;
             }
 
@@ -688,6 +712,16 @@ impl SyncCoordinator {
 
     /// Check if a path matches exclude patterns
     fn is_excluded(&self, rel: &str) -> bool {
+        if rel.contains(".~#") {
+            return true;
+        }
+        if rel == ".DS_Store" || rel.ends_with("/.DS_Store") {
+            return true;
+        }
+        if rel.starts_with(".tmp") || rel.ends_with(".tmp") || rel.contains(".tmp.") {
+            return true;
+        }
+
         for pattern in &self.config.sync.exclude_patterns {
             if let Some(dir_name) = pattern.strip_suffix("/**") {
                 if rel.starts_with(dir_name) || rel.starts_with(&format!("{}/", dir_name)) {
@@ -695,7 +729,8 @@ impl SyncCoordinator {
                 }
             }
             if let Some(ext) = pattern.strip_prefix("*.") {
-                if rel.ends_with(&format!(".{}", ext)) {
+                let suffix = format!(".{}", ext);
+                if rel.ends_with(&suffix) || rel.contains(&format!("{}.", suffix)) {
                     return true;
                 }
             }
@@ -923,9 +958,10 @@ impl SyncCoordinator {
 
         match event {
             WatchEvent::Created(path) | WatchEvent::Modified(path) => {
-                let rel_path = path.strip_prefix(&self.config.vault_path())
+                let rel_path = path
+                    .strip_prefix(&self.config.vault_path())
                     .map_err(|e| FnsError::Sync {
-                        message: format!("Failed to get relative path: {}", e)
+                        message: format!("Failed to get relative path: {}", e),
                     })?
                     .to_string_lossy()
                     .to_string();
@@ -950,9 +986,10 @@ impl SyncCoordinator {
                 }
             }
             WatchEvent::Deleted(path) => {
-                let rel_path = path.strip_prefix(&self.config.vault_path())
+                let rel_path = path
+                    .strip_prefix(&self.config.vault_path())
                     .map_err(|e| FnsError::Sync {
-                        message: format!("Failed to get relative path: {}", e)
+                        message: format!("Failed to get relative path: {}", e),
                     })?
                     .to_string_lossy()
                     .to_string();
@@ -977,16 +1014,18 @@ impl SyncCoordinator {
                 }
             }
             WatchEvent::Moved { from, to } => {
-                let old_rel = from.strip_prefix(&self.config.vault_path())
+                let old_rel = from
+                    .strip_prefix(&self.config.vault_path())
                     .map_err(|e| FnsError::Sync {
-                        message: format!("Failed to get relative path: {}", e)
+                        message: format!("Failed to get relative path: {}", e),
                     })?
                     .to_string_lossy()
                     .to_string();
 
-                let new_rel = to.strip_prefix(&self.config.vault_path())
+                let new_rel = to
+                    .strip_prefix(&self.config.vault_path())
                     .map_err(|e| FnsError::Sync {
-                        message: format!("Failed to get relative path: {}", e)
+                        message: format!("Failed to get relative path: {}", e),
                     })?
                     .to_string_lossy()
                     .to_string();
@@ -1042,7 +1081,9 @@ impl SyncCoordinator {
                 // Case 4: Both included - file moved within sync scope, push rename
                 if self.is_config_file(&new_rel) {
                     if self.config.sync.sync_config {
-                        self.setting_sync.push_rename(ws, &new_rel, &old_rel).await?;
+                        self.setting_sync
+                            .push_rename(ws, &new_rel, &old_rel)
+                            .await?;
                     }
                 } else if new_rel.ends_with(".md") {
                     if self.config.sync.sync_notes {
@@ -1082,68 +1123,66 @@ impl SyncCoordinator {
                     }
                 }
 
-                let (action, data) = decode_message(text_str)
-                    .map_err(|e| FnsError::Protocol { message: e })?;
+                let (action, data) =
+                    decode_message(text_str).map_err(|e| FnsError::Protocol { message: e })?;
 
                 match action {
-                    Action::Server(server_action) => {
-                        match server_action {
-                            ServerAction::NoteSyncModify => {
-                                self.note_sync.handle_note_modify(&data)?;
-                            }
-                            ServerAction::NoteSyncDelete => {
-                                self.note_sync.handle_note_delete(&data)?;
-                            }
-                            ServerAction::NoteSyncRename => {
-                                self.note_sync.handle_note_rename(&data)?;
-                            }
-                            ServerAction::NoteSyncMtime => {
-                                self.note_sync.handle_note_mtime(&data)?;
-                            }
-                            ServerAction::NoteModifyAck => {
-                                debug!("Received NoteModifyAck");
-                            }
-                            ServerAction::NoteDeleteAck => {
-                                debug!("Received NoteDeleteAck");
-                            }
-                            ServerAction::FileSyncUpdate => {
-                                let mut file_sync = self.file_sync.lock().await;
-                                file_sync.handle_sync_update(ws, data).await?;
-                            }
-                            ServerAction::FileSyncDelete => {
-                                let mut file_sync = self.file_sync.lock().await;
-                                file_sync.handle_sync_delete(data)?;
-                            }
-                            ServerAction::FileSyncChunkDownload => {
-                                let mut file_sync = self.file_sync.lock().await;
-                                file_sync.handle_chunk_download(data).await?;
-                            }
-                            ServerAction::FileUpload => {
-                                let mut file_sync = self.file_sync.lock().await;
-                                file_sync.handle_upload_session(ws, data).await?;
-                            }
-                            ServerAction::FileUploadAck => {
-                                let mut file_sync = self.file_sync.lock().await;
-                                file_sync.handle_upload_ack(data)?;
-                            }
-                            ServerAction::FileDeleteAck => {
-                                let mut file_sync = self.file_sync.lock().await;
-                                file_sync.handle_delete_ack(data)?;
-                            }
-                            ServerAction::SettingSyncModify => {
-                                self.setting_sync.handle_setting_modify(&data)?;
-                            }
-                            ServerAction::SettingSyncDelete => {
-                                self.setting_sync.handle_setting_delete(&data)?;
-                            }
-                            ServerAction::SettingModifyAck => {
-                                debug!("Received SettingModifyAck");
-                            }
-                            _ => {
-                                debug!(action = ?server_action, "Ignoring server action in continuous mode");
-                            }
+                    Action::Server(server_action) => match server_action {
+                        ServerAction::NoteSyncModify => {
+                            self.note_sync.handle_note_modify(&data)?;
                         }
-                    }
+                        ServerAction::NoteSyncDelete => {
+                            self.note_sync.handle_note_delete(&data)?;
+                        }
+                        ServerAction::NoteSyncRename => {
+                            self.note_sync.handle_note_rename(&data)?;
+                        }
+                        ServerAction::NoteSyncMtime => {
+                            self.note_sync.handle_note_mtime(&data)?;
+                        }
+                        ServerAction::NoteModifyAck => {
+                            debug!("Received NoteModifyAck");
+                        }
+                        ServerAction::NoteDeleteAck => {
+                            debug!("Received NoteDeleteAck");
+                        }
+                        ServerAction::FileSyncUpdate => {
+                            let mut file_sync = self.file_sync.lock().await;
+                            file_sync.handle_sync_update(ws, data).await?;
+                        }
+                        ServerAction::FileSyncDelete => {
+                            let mut file_sync = self.file_sync.lock().await;
+                            file_sync.handle_sync_delete(data)?;
+                        }
+                        ServerAction::FileSyncChunkDownload => {
+                            let mut file_sync = self.file_sync.lock().await;
+                            file_sync.handle_chunk_download(data).await?;
+                        }
+                        ServerAction::FileUpload => {
+                            let mut file_sync = self.file_sync.lock().await;
+                            file_sync.handle_upload_session(ws, data).await?;
+                        }
+                        ServerAction::FileUploadAck => {
+                            let mut file_sync = self.file_sync.lock().await;
+                            file_sync.handle_upload_ack(data)?;
+                        }
+                        ServerAction::FileDeleteAck => {
+                            let mut file_sync = self.file_sync.lock().await;
+                            file_sync.handle_delete_ack(data)?;
+                        }
+                        ServerAction::SettingSyncModify => {
+                            self.setting_sync.handle_setting_modify(&data)?;
+                        }
+                        ServerAction::SettingSyncDelete => {
+                            self.setting_sync.handle_setting_delete(&data)?;
+                        }
+                        ServerAction::SettingModifyAck => {
+                            debug!("Received SettingModifyAck");
+                        }
+                        _ => {
+                            debug!(action = ?server_action, "Ignoring server action in continuous mode");
+                        }
+                    },
                     Action::Client(_) => {
                         debug!("Ignoring client action from server");
                     }
@@ -1202,7 +1241,7 @@ mod tests {
         result.notes_synced = 5;
         result.files_synced = 3;
         result.errors.push("Test error".to_string());
-        
+
         assert!(result.has_errors());
         assert_eq!(result.total_synced(), 8);
         assert_eq!(result.errors.len(), 1);
@@ -1216,13 +1255,18 @@ mod tests {
             ".trash/**".to_string(),
             "*.tmp".to_string(),
         ];
-        
+
         let coordinator = SyncCoordinator::new(config);
-        
+
         assert!(coordinator.is_excluded(".git/config"));
         assert!(coordinator.is_excluded(".git/objects/abc"));
         assert!(coordinator.is_excluded(".trash/old.md"));
+        assert!(coordinator.is_excluded(".DS_Store"));
+        assert!(coordinator.is_excluded("notes/.DS_Store"));
+        assert!(coordinator.is_excluded(".tmpwEYnim"));
         assert!(coordinator.is_excluded("notes/temp.tmp"));
+        assert!(coordinator.is_excluded("notes/hello.md.tmp.w_3o8rmv"));
+        assert!(coordinator.is_excluded("notes/hello.md.~#0"));
         assert!(!coordinator.is_excluded("notes/hello.md"));
         assert!(!coordinator.is_excluded(".obsidian/app.json"));
     }
@@ -1231,12 +1275,12 @@ mod tests {
     fn test_ignore_file() {
         let config = AppConfig::default();
         let mut coordinator = SyncCoordinator::new(config);
-        
+
         assert!(!coordinator.is_ignored("test.md"));
-        
+
         coordinator.ignore_file("test.md");
         assert!(coordinator.is_ignored("test.md"));
-        
+
         coordinator.ignore_file("another.md");
         assert!(coordinator.is_ignored("test.md"));
         assert!(coordinator.is_ignored("another.md"));
@@ -1246,13 +1290,13 @@ mod tests {
     fn test_unignore_file() {
         let config = AppConfig::default();
         let mut coordinator = SyncCoordinator::new(config);
-        
+
         coordinator.ignore_file("test.md");
         assert!(coordinator.is_ignored("test.md"));
-        
+
         coordinator.unignore_file("test.md");
         assert!(!coordinator.is_ignored("test.md"));
-        
+
         coordinator.unignore_file("nonexistent.md");
         assert!(!coordinator.is_ignored("nonexistent.md"));
     }
@@ -1261,9 +1305,9 @@ mod tests {
     fn test_ignored_file_not_processed() {
         let config = AppConfig::default();
         let mut coordinator = SyncCoordinator::new(config);
-        
+
         coordinator.ignore_file("notes/test.md");
-        
+
         assert!(coordinator.is_ignored("notes/test.md"));
         assert!(!coordinator.is_ignored("notes/other.md"));
     }
@@ -1271,103 +1315,112 @@ mod tests {
     #[test]
     fn test_move_both_excluded() {
         let mut config = AppConfig::default();
-        config.sync.exclude_patterns = vec![
-            ".git/**".to_string(),
-            ".trash/**".to_string(),
-        ];
-        
+        config.sync.exclude_patterns = vec![".git/**".to_string(), ".trash/**".to_string()];
+
         let coordinator = SyncCoordinator::new(config);
-        
+
         let old_rel = ".git/config";
         let new_rel = ".trash/config";
-        
+
         let old_excluded = coordinator.is_excluded(old_rel);
         let new_excluded = coordinator.is_excluded(new_rel);
-        
+
         assert!(old_excluded, "Old path should be excluded");
         assert!(new_excluded, "New path should be excluded");
-        assert!(old_excluded && new_excluded, "Both excluded - no action needed");
+        assert!(
+            old_excluded && new_excluded,
+            "Both excluded - no action needed"
+        );
     }
 
     #[test]
     fn test_move_from_included_to_excluded() {
         let mut config = AppConfig::default();
-        config.sync.exclude_patterns = vec![
-            ".trash/**".to_string(),
-        ];
-        
+        config.sync.exclude_patterns = vec![".trash/**".to_string()];
+
         let coordinator = SyncCoordinator::new(config);
-        
+
         let old_rel = "notes/hello.md";
         let new_rel = ".trash/hello.md";
-        
+
         let old_excluded = coordinator.is_excluded(old_rel);
         let new_excluded = coordinator.is_excluded(new_rel);
-        
+
         assert!(!old_excluded, "Old path should be included");
         assert!(new_excluded, "New path should be excluded");
-        assert!(!old_excluded && new_excluded, "Move from included to excluded - should delete old");
+        assert!(
+            !old_excluded && new_excluded,
+            "Move from included to excluded - should delete old"
+        );
     }
 
     #[test]
     fn test_move_from_excluded_to_included() {
         let mut config = AppConfig::default();
-        config.sync.exclude_patterns = vec![
-            ".trash/**".to_string(),
-        ];
-        
+        config.sync.exclude_patterns = vec![".trash/**".to_string()];
+
         let coordinator = SyncCoordinator::new(config);
-        
+
         let old_rel = ".trash/restored.md";
         let new_rel = "notes/restored.md";
-        
+
         let old_excluded = coordinator.is_excluded(old_rel);
         let new_excluded = coordinator.is_excluded(new_rel);
-        
+
         assert!(old_excluded, "Old path should be excluded");
         assert!(!new_excluded, "New path should be included");
-        assert!(old_excluded && !new_excluded, "Move from excluded to included - should upload new");
+        assert!(
+            old_excluded && !new_excluded,
+            "Move from excluded to included - should upload new"
+        );
     }
 
     #[test]
     fn test_move_both_included() {
         let mut config = AppConfig::default();
-        config.sync.exclude_patterns = vec![
-            ".trash/**".to_string(),
-        ];
-        
+        config.sync.exclude_patterns = vec![".trash/**".to_string()];
+
         let coordinator = SyncCoordinator::new(config);
-        
+
         let old_rel = "notes/old-name.md";
         let new_rel = "notes/new-name.md";
-        
+
         let old_excluded = coordinator.is_excluded(old_rel);
         let new_excluded = coordinator.is_excluded(new_rel);
-        
+
         assert!(!old_excluded, "Old path should be included");
         assert!(!new_excluded, "New path should be included");
-        assert!(!old_excluded && !new_excluded, "Both included - should push rename");
+        assert!(
+            !old_excluded && !new_excluded,
+            "Both included - should push rename"
+        );
     }
 
     #[test]
     fn test_move_boundary_with_extension_exclusion() {
         let mut config = AppConfig::default();
-        config.sync.exclude_patterns = vec![
-            "*.tmp".to_string(),
-            "*.bak".to_string(),
-        ];
-        
+        config.sync.exclude_patterns = vec!["*.tmp".to_string(), "*.bak".to_string()];
+
         let coordinator = SyncCoordinator::new(config);
-        
+
         let old_rel = "notes/file.md";
         let new_rel = "notes/file.tmp";
-        
+        let temp_suffix_rel = "notes/file.md.tmp.w_3o8rmv";
+        let editor_temp_rel = "notes/file.md.~#0";
+
         let old_excluded = coordinator.is_excluded(old_rel);
         let new_excluded = coordinator.is_excluded(new_rel);
-        
+        let temp_suffix_excluded = coordinator.is_excluded(temp_suffix_rel);
+        let editor_temp_excluded = coordinator.is_excluded(editor_temp_rel);
+
         assert!(!old_excluded, "Old .md file should be included");
         assert!(new_excluded, "New .tmp file should be excluded");
-        assert!(!old_excluded && new_excluded, "Move from .md to .tmp - should delete old");
+        assert!(temp_suffix_excluded, "New .tmp.* file should be excluded");
+        assert!(editor_temp_excluded, "New .~# file should be excluded");
+        assert!(
+            !old_excluded && new_excluded,
+            "Move from .md to .tmp - should delete old"
+        );
     }
 
     #[test]
@@ -1383,7 +1436,11 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
 
-        assert_eq!(counter.load(Ordering::SeqCst), 0, "Callback not invoked yet");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "Callback not invoked yet"
+        );
     }
 
     #[tokio::test]

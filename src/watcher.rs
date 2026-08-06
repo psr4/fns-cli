@@ -65,11 +65,11 @@ impl FileWatcher {
     ) -> Result<(Self, Receiver<WatchEvent>), FnsError> {
         let (event_tx, event_rx) = channel();
         let (raw_tx, raw_rx) = channel();
-        
+
         let watcher = RecommendedWatcher::new(raw_tx, notify::Config::default())?;
-        
+
         let known_files = Arc::new(Mutex::new(HashSet::new()));
-        
+
         let file_watcher = FileWatcher {
             watcher,
             vault_path,
@@ -78,7 +78,7 @@ impl FileWatcher {
             exclude_patterns,
             known_files,
         };
-        
+
         Ok((file_watcher, event_rx))
     }
 
@@ -92,7 +92,8 @@ impl FileWatcher {
     /// Returns an error if watching cannot be started.
     pub fn start(&mut self) -> Result<(), FnsError> {
         info!("Starting file watcher on {:?}", self.vault_path);
-        self.watcher.watch(&self.vault_path, RecursiveMode::Recursive)?;
+        self.watcher
+            .watch(&self.vault_path, RecursiveMode::Recursive)?;
         self.initialize_known_files();
         Ok(())
     }
@@ -116,21 +117,23 @@ impl FileWatcher {
     /// - `.git/**` - matches any path starting with `.git/`
     /// - `.trash/**` - matches any path starting with `.trash/`
     /// - `*.tmp` - matches any file ending with `.tmp`
+    /// - `.tmp*` - matches root-level atomic-write temp files
+    /// - `.DS_Store` - matches macOS Finder metadata files
     /// - Exact path matches
     pub fn is_excluded(&self, path: &PathBuf) -> bool {
         let rel_path = match path.strip_prefix(&self.vault_path) {
             Ok(rel) => rel,
             Err(_) => path,
         };
-        
+
         let rel_str = rel_path.to_string_lossy();
-        
+
         for pattern in &self.exclude_patterns {
             if Self::matches_pattern(&rel_str, pattern) {
                 return true;
             }
         }
-        
+
         let path_str = rel_path.to_string_lossy();
         if path_str.starts_with(".git/") || path_str == ".git" {
             return true;
@@ -141,7 +144,19 @@ impl FileWatcher {
         if path_str == ".fns_state.json" {
             return true;
         }
-        
+        if path_str == ".DS_Store" || path_str.ends_with("/.DS_Store") {
+            return true;
+        }
+        if path_str.starts_with(".tmp") {
+            return true;
+        }
+        if path_str.ends_with(".tmp") || path_str.contains(".tmp.") {
+            return true;
+        }
+        if path_str.contains(".~#") {
+            return true;
+        }
+
         false
     }
 
@@ -149,7 +164,10 @@ impl FileWatcher {
     pub fn initialize_known_files(&self) {
         if let Ok(mut known) = self.known_files.lock() {
             known.clear();
-            for entry in walkdir::WalkDir::new(&self.vault_path).into_iter().filter_map(|e| e.ok()) {
+            for entry in walkdir::WalkDir::new(&self.vault_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
                 if entry.file_type().is_file() {
                     if let Ok(rel) = entry.path().strip_prefix(&self.vault_path) {
                         if !self.is_excluded(&entry.path().to_path_buf()) {
@@ -173,17 +191,19 @@ impl FileWatcher {
         if let Some(prefix) = pattern.strip_suffix("/**") {
             return path.starts_with(prefix) || path == prefix;
         }
-        
-        // Handle extension patterns like "*.tmp"
+
+        // Handle extension patterns like "*.tmp". Treat ".tmp.<suffix>" as
+        // excluded too because many editors/agents create transient files such
+        // as "note.md.tmp.w_3o8rmv" while writing atomically.
         if let Some(suffix) = pattern.strip_prefix('*') {
-            return path.ends_with(suffix);
+            return path.ends_with(suffix) || path.contains(&format!("{}.", suffix));
         }
-        
+
         // Handle prefix patterns like ".tmp*"
         if let Some(prefix) = pattern.strip_suffix('*') {
             return path.starts_with(prefix);
         }
-        
+
         // Handle exact matches
         path == pattern
     }
@@ -216,7 +236,8 @@ impl FileWatcher {
             } else {
                 format!("{}/", dir_rel)
             };
-            known.iter()
+            known
+                .iter()
                 .filter(|f| f.starts_with(&prefix) || *f == dir_rel)
                 .cloned()
                 .collect()
@@ -230,97 +251,89 @@ impl FileWatcher {
     /// Returns a vector of WatchEvents (move events may produce multiple).
     pub fn process_event(&self, event: notify::Event) -> Vec<WatchEvent> {
         let mut watch_events = Vec::new();
-        
-        debug!("Processing notify event: kind={:?} paths={:?}", event.kind, event.paths);
-        
-        for path in &event.paths {
-            if self.is_excluded(path) {
-                continue;
-            }
+
+        if event.paths.iter().all(|path| self.is_excluded(path)) {
+            return watch_events;
         }
-        
+
+        debug!(
+            "Processing notify event: kind={:?} paths={:?}",
+            event.kind, event.paths
+        );
+
         match event.kind {
             notify::EventKind::Create(_) => {
                 for path in event.paths {
                     let is_file = path.is_file();
                     let is_excluded = self.is_excluded(&path);
-                    debug!("Create event: path={:?} is_file={} is_excluded={}", path, is_file, is_excluded);
+                    debug!(
+                        "Create event: path={:?} is_file={} is_excluded={}",
+                        path, is_file, is_excluded
+                    );
                     if !is_excluded && is_file {
                         self.track_file(&path);
                         watch_events.push(WatchEvent::Created(path));
                     }
                 }
             }
-            notify::EventKind::Modify(kind) => {
-                match kind {
-                    notify::event::ModifyKind::Name(rename_mode) => {
-                        match rename_mode {
-                            notify::event::RenameMode::To => {
-                                for path in event.paths {
-                                    if !self.is_excluded(&path) && path.is_file() {
-                                        debug!("Rename To event: {:?}", path);
-                                        self.track_file(&path);
-                                        watch_events.push(WatchEvent::Created(path));
-                                    }
-                                }
+            notify::EventKind::Modify(kind) => match kind {
+                notify::event::ModifyKind::Name(rename_mode) => match rename_mode {
+                    notify::event::RenameMode::To => {
+                        for path in event.paths {
+                            if !self.is_excluded(&path) && path.is_file() {
+                                debug!("Rename To event: {:?}", path);
+                                self.track_file(&path);
+                                watch_events.push(WatchEvent::Created(path));
                             }
-                            notify::event::RenameMode::From => {
-                                for path in &event.paths {
-                                    if !self.is_excluded(path) {
+                        }
+                    }
+                    notify::event::RenameMode::From => {
+                        for path in &event.paths {
+                            if !self.is_excluded(path) {
+                                self.untrack_file(path);
+                            }
+                        }
+                    }
+                    notify::event::RenameMode::Both => {
+                        if event.paths.len() == 2 {
+                            let from = &event.paths[0];
+                            let to = &event.paths[1];
+                            if !self.is_excluded(from) && !self.is_excluded(to) {
+                                self.untrack_file(from);
+                                self.track_file(to);
+                                watch_events.push(WatchEvent::Moved {
+                                    from: from.clone(),
+                                    to: to.clone(),
+                                });
+                            }
+                        }
+                    }
+                    notify::event::RenameMode::Any => {
+                        for path in &event.paths {
+                            if self.is_excluded(path) {
+                                continue;
+                            }
+                            if path.exists() && path.is_file() {
+                                debug!("Rename Any (target): {:?}", path);
+                                self.track_file(path);
+                                watch_events.push(WatchEvent::Created(path.clone()));
+                            } else {
+                                debug!("Rename Any (source, now deleted): {:?}", path);
+                                if let Ok(rel) = path.strip_prefix(&self.vault_path) {
+                                    let rel_str = rel.to_string_lossy();
+                                    let victims = self.get_files_under_dir(&rel_str);
+                                    if victims.is_empty() {
                                         self.untrack_file(path);
-                                    }
-                                }
-                            }
-                            notify::event::RenameMode::Both => {
-                                if event.paths.len() == 2 {
-                                    let from = &event.paths[0];
-                                    let to = &event.paths[1];
-                                    if !self.is_excluded(from) && !self.is_excluded(to) {
-                                        self.untrack_file(from);
-                                        self.track_file(to);
-                                        watch_events.push(WatchEvent::Moved {
-                                            from: from.clone(),
-                                            to: to.clone(),
-                                        });
-                                    }
-                                }
-                            }
-                            notify::event::RenameMode::Any => {
-                                for path in &event.paths {
-                                    if self.is_excluded(path) {
-                                        continue;
-                                    }
-                                    if path.exists() && path.is_file() {
-                                        debug!("Rename Any (target): {:?}", path);
-                                        self.track_file(path);
-                                        watch_events.push(WatchEvent::Created(path.clone()));
+                                        watch_events.push(WatchEvent::Deleted(path.clone()));
                                     } else {
-                                        debug!("Rename Any (source, now deleted): {:?}", path);
-                                        if let Ok(rel) = path.strip_prefix(&self.vault_path) {
-                                            let rel_str = rel.to_string_lossy();
-                                            let victims = self.get_files_under_dir(&rel_str);
-                                            if victims.is_empty() {
-                                                self.untrack_file(path);
-                                                watch_events.push(WatchEvent::Deleted(path.clone()));
-                                            } else {
-                                                for victim in victims {
-                                                    if let Ok(mut known) = self.known_files.lock() {
-                                                        known.remove(&victim);
-                                                    }
-                                                    watch_events.push(WatchEvent::Deleted(self.vault_path.join(&victim)));
-                                                }
+                                        for victim in victims {
+                                            if let Ok(mut known) = self.known_files.lock() {
+                                                known.remove(&victim);
                                             }
+                                            watch_events.push(WatchEvent::Deleted(
+                                                self.vault_path.join(&victim),
+                                            ));
                                         }
-                                    }
-                                }
-                            }
-                            _ => {
-                                for path in event.paths {
-                                    if self.is_excluded(&path) {
-                                        continue;
-                                    }
-                                    if path.exists() {
-                                        watch_events.push(WatchEvent::Modified(path));
                                     }
                                 }
                             }
@@ -336,8 +349,18 @@ impl FileWatcher {
                             }
                         }
                     }
+                },
+                _ => {
+                    for path in event.paths {
+                        if self.is_excluded(&path) {
+                            continue;
+                        }
+                        if path.exists() {
+                            watch_events.push(WatchEvent::Modified(path));
+                        }
+                    }
                 }
-            }
+            },
             notify::EventKind::Remove(remove_kind) => {
                 for path in event.paths {
                     if self.is_excluded(&path) {
@@ -353,7 +376,8 @@ impl FileWatcher {
                                     if let Ok(mut known) = self.known_files.lock() {
                                         known.remove(&victim);
                                     }
-                                    watch_events.push(WatchEvent::Deleted(self.vault_path.join(&victim)));
+                                    watch_events
+                                        .push(WatchEvent::Deleted(self.vault_path.join(&victim)));
                                 }
                             }
                         }
@@ -371,7 +395,7 @@ impl FileWatcher {
                 if event.paths.len() == 2 {
                     let from = &event.paths[0];
                     let to = &event.paths[1];
-                    
+
                     if !from.exists() && to.exists() {
                         if !self.is_excluded(from) && !self.is_excluded(to) {
                             watch_events.push(WatchEvent::Moved {
@@ -386,7 +410,7 @@ impl FileWatcher {
                 debug!("Unhandled event kind: {:?}", event.kind);
             }
         }
-        
+
         watch_events
     }
 
@@ -459,7 +483,6 @@ pub fn run_watcher_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn test_matches_pattern_recursive() {
@@ -473,24 +496,39 @@ mod tests {
     fn test_matches_pattern_extension() {
         assert!(FileWatcher::matches_pattern("file.tmp", "*.tmp"));
         assert!(FileWatcher::matches_pattern("notes.tmp", "*.tmp"));
+        assert!(FileWatcher::matches_pattern(
+            "notes.md.tmp.w_3o8rmv",
+            "*.tmp"
+        ));
         assert!(!FileWatcher::matches_pattern("notes.md", "*.tmp"));
     }
 
     #[test]
     fn test_matches_pattern_exact() {
-        assert!(FileWatcher::matches_pattern(".fns_state.json", ".fns_state.json"));
-        assert!(!FileWatcher::matches_pattern("other.json", ".fns_state.json"));
+        assert!(FileWatcher::matches_pattern(
+            ".fns_state.json",
+            ".fns_state.json"
+        ));
+        assert!(!FileWatcher::matches_pattern(
+            "other.json",
+            ".fns_state.json"
+        ));
     }
 
     #[test]
     fn test_is_excluded_default_paths() {
         let vault_path = PathBuf::from("/vault");
         let (watcher, _rx) = FileWatcher::new(vault_path, vec![]).unwrap();
-        
+
         assert!(watcher.is_excluded(&PathBuf::from("/vault/.git")));
         assert!(watcher.is_excluded(&PathBuf::from("/vault/.git/config")));
         assert!(watcher.is_excluded(&PathBuf::from("/vault/.trash/old.md")));
         assert!(watcher.is_excluded(&PathBuf::from("/vault/.fns_state.json")));
+        assert!(watcher.is_excluded(&PathBuf::from("/vault/.DS_Store")));
+        assert!(watcher.is_excluded(&PathBuf::from("/vault/notes/.DS_Store")));
+        assert!(watcher.is_excluded(&PathBuf::from("/vault/file.tmp")));
+        assert!(watcher.is_excluded(&PathBuf::from("/vault/file.md.tmp.w_3o8rmv")));
+        assert!(watcher.is_excluded(&PathBuf::from("/vault/.tmpwEYnim")));
         assert!(!watcher.is_excluded(&PathBuf::from("/vault/notes.md")));
     }
 
@@ -499,9 +537,26 @@ mod tests {
         let vault_path = PathBuf::from("/vault");
         let patterns = vec!["*.tmp".to_string(), "drafts/**".to_string()];
         let (watcher, _rx) = FileWatcher::new(vault_path, patterns).unwrap();
-        
+
         assert!(watcher.is_excluded(&PathBuf::from("/vault/file.tmp")));
+        assert!(watcher.is_excluded(&PathBuf::from("/vault/file.md.tmp.w_3o8rmv")));
+        assert!(watcher.is_excluded(&PathBuf::from("/vault/file.md.~#0")));
         assert!(watcher.is_excluded(&PathBuf::from("/vault/drafts/note.md")));
         assert!(!watcher.is_excluded(&PathBuf::from("/vault/notes.md")));
+    }
+
+    #[test]
+    fn test_process_event_ignores_tmp_dotfile() {
+        let vault_path = PathBuf::from("/vault");
+        let (watcher, _rx) = FileWatcher::new(vault_path, vec![]).unwrap();
+        let event = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Metadata(
+                notify::event::MetadataKind::Any,
+            )),
+            paths: vec![PathBuf::from("/vault/.tmpwEYnim")],
+            attrs: notify::event::EventAttributes::new(),
+        };
+
+        assert!(watcher.process_event(event).is_empty());
     }
 }

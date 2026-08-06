@@ -14,17 +14,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::SinkExt;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::{debug, info, warn};
 
 use crate::config::AppConfig;
 use crate::error::FnsError;
-use crate::hash::hash_path;
+use crate::hash::{hash_bytes, hash_path};
 use crate::protocol::{
-    build_binary_chunk, BinaryChunkParser, ChunkReassembler, ClientAction,
-    FileDeleteRequest, FileSyncCheck, FileSyncRequest, FileUploadCheckRequest, ServerAction,
-    SEPARATOR,
+    BinaryChunkParser, ChunkReassembler, ClientAction, FileDeleteRequest, FileSyncCheck,
+    FileSyncRequest, FileUploadCheckRequest, SEPARATOR, ServerAction, build_binary_chunk,
 };
 use crate::state::SyncState;
 use crate::ws_client::WsStream;
@@ -85,10 +84,14 @@ pub struct FileSync {
     expected_modify: usize,
     /// Expected delete count from server
     expected_delete: usize,
+    /// Expected upload count requested by server
+    expected_upload: usize,
     /// Received modify count
     received_modify: usize,
     /// Received delete count
     received_delete: usize,
+    /// Received upload requests
+    received_upload: usize,
     /// Whether sync end has been received
     got_end: bool,
     /// Pending last_time from server
@@ -109,8 +112,10 @@ impl FileSync {
             last_activity: Instant::now(),
             expected_modify: 0,
             expected_delete: 0,
+            expected_upload: 0,
             received_modify: 0,
             received_delete: 0,
+            received_upload: 0,
             got_end: false,
             pending_last_time: 0,
         }
@@ -126,7 +131,11 @@ impl FileSync {
         Self {
             vault_path,
             vault_name,
-            chunk_size: if chunk_size == 0 { DEFAULT_CHUNK_SIZE } else { chunk_size },
+            chunk_size: if chunk_size == 0 {
+                DEFAULT_CHUNK_SIZE
+            } else {
+                chunk_size
+            },
             upload_concurrency: if upload_concurrency == 0 {
                 DEFAULT_UPLOAD_CONCURRENCY
             } else {
@@ -138,8 +147,10 @@ impl FileSync {
             last_activity: Instant::now(),
             expected_modify: 0,
             expected_delete: 0,
+            expected_upload: 0,
             received_modify: 0,
             received_delete: 0,
+            received_upload: 0,
             got_end: false,
             pending_last_time: 0,
         }
@@ -151,8 +162,10 @@ impl FileSync {
         self.active_downloads.clear();
         self.expected_modify = 0;
         self.expected_delete = 0;
+        self.expected_upload = 0;
         self.received_modify = 0;
         self.received_delete = 0;
+        self.received_upload = 0;
         self.got_end = false;
         self.pending_last_time = 0;
         self.last_activity = Instant::now();
@@ -171,8 +184,8 @@ impl FileSync {
         if !self.active_downloads.is_empty() {
             return false;
         }
-        let total_expected = self.expected_modify + self.expected_delete;
-        let total_received = self.received_modify + self.received_delete;
+        let total_expected = self.expected_modify + self.expected_delete + self.expected_upload;
+        let total_received = self.received_modify + self.received_delete + self.received_upload;
         if total_received >= total_expected {
             return false;
         }
@@ -184,8 +197,8 @@ impl FileSync {
         if !self.got_end {
             return false;
         }
-        let total_expected = self.expected_modify + self.expected_delete;
-        let total_received = self.received_modify + self.received_delete;
+        let total_expected = self.expected_modify + self.expected_delete + self.expected_upload;
+        let total_received = self.received_modify + self.received_delete + self.received_upload;
         total_received >= total_expected
             && self.active_downloads.is_empty()
             && self.active_uploads.is_empty()
@@ -195,7 +208,7 @@ impl FileSync {
     pub async fn request_sync(
         &mut self,
         ws: &mut WsStream,
-        state: &SyncState,
+        _state: &SyncState,
     ) -> Result<(), FnsError> {
         self.reset();
 
@@ -205,7 +218,10 @@ impl FileSync {
 
         let request = FileSyncRequest {
             vault: self.vault_name.clone(),
-            last_time: state.last_file_sync_time,
+            // The server compares against only files changed after lastTime, then treats
+            // the remaining client paths as missing on the server. Use a full file index
+            // until the server keeps a separate all-files index for this check.
+            last_time: 0,
             files,
             context: Some(context),
         };
@@ -218,7 +234,7 @@ impl FileSync {
         );
 
         info!(
-            last_time = state.last_file_sync_time,
+            last_time = request.last_time,
             file_count = file_count,
             "Requesting FileSync"
         );
@@ -261,7 +277,12 @@ impl FileSync {
             }
 
             // Skip dot-prefixed directories (handled by SettingSync)
-            if rel.split('/').next().map(|s| s.starts_with('.')).unwrap_or(false) {
+            if rel
+                .split('/')
+                .next()
+                .map(|s| s.starts_with('.'))
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -273,6 +294,7 @@ impl FileSync {
                 path_hash: hash_path(&rel),
                 content_hash,
                 size: metadata.len() as i64,
+                ctime: file_ctime(&metadata)?,
                 mtime: file_mtime(&metadata)?,
             });
         }
@@ -280,24 +302,10 @@ impl FileSync {
         Ok(files)
     }
 
-    /// Hash file content using DJB2 algorithm (matches Python and server)
+    /// Hash file content using the protocol string hash (matches Python and server)
     fn hash_file_content(&self, path: &Path) -> Result<String, FnsError> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(path)?;
-        let mut hash: i32 = 0;
-        let mut buffer = vec![0u8; 65536];
-        
-        loop {
-            let bytes_read = file.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
-            }
-            for &byte in &buffer[..bytes_read] {
-                hash = (hash << 5).wrapping_sub(hash).wrapping_add(byte as i32);
-            }
-        }
-        
-        Ok(hash.to_string())
+        let bytes = std::fs::read(path)?;
+        Ok(hash_bytes(&bytes))
     }
 
     /// Push upload a file to server
@@ -403,11 +411,10 @@ impl FileSync {
             }
             ServerAction::FileSyncEnd => {
                 self.handle_sync_end(data)?;
-                return Ok(true);
             }
             _ => {}
         }
-        Ok(false)
+        Ok(self.is_complete())
     }
 
     /// Handle FileSyncUpdate from server
@@ -426,6 +433,12 @@ impl FileSync {
             .unwrap_or_default();
 
         if rel_path.is_empty() {
+            return Ok(());
+        }
+
+        if is_dot_prefixed_path(&rel_path) {
+            debug!(path = rel_path, "FileSyncUpdate ignored for config path");
+            self.received_modify += 1;
             return Ok(());
         }
 
@@ -471,7 +484,6 @@ impl FileSync {
                 })?;
 
             info!(path = rel_path, "FileSyncUpdate (requesting chunks)");
-            self.received_modify += 1;
         }
 
         Ok(())
@@ -492,9 +504,16 @@ impl FileSync {
             return Ok(());
         }
 
+        if is_dot_prefixed_path(&rel_path) {
+            debug!(path = rel_path, "FileSyncDelete ignored for config path");
+            self.received_delete += 1;
+            return Ok(());
+        }
+
         // Echo suppression: skip if we triggered this delete ourselves
         if self.echo_hashes.get(&rel_path).map(|s| s.as_str()) == Some(DELETED_SENTINEL) {
             debug!(path = rel_path, "FileSyncDelete: echo suppressed");
+            self.received_delete += 1;
             return Ok(());
         }
 
@@ -687,18 +706,31 @@ impl FileSync {
         let full_path = self.vault_path.join(&rel_path);
         if !full_path.exists() {
             warn!(path = rel_path, "Upload requested but file missing");
+            self.received_upload += 1;
             return Ok(());
         }
 
         let content_hash = self.hash_file_content(&full_path)?;
         if self.echo_hashes.get(&rel_path).map(|s| s.as_str()) == Some(&content_hash) {
             info!(path = rel_path, "Skipping upload - hash matches cache");
+            self.received_upload += 1;
             return Ok(());
         }
 
-        self.upload_file(ws, &session_id, chunk_size, &rel_path, &full_path)
+        let total_chunks = self
+            .upload_file(ws, &session_id, chunk_size, &rel_path, &full_path)
             .await?;
 
+        self.active_uploads.insert(
+            session_id.clone(),
+            UploadSession {
+                session_id,
+                path: rel_path.clone(),
+                chunk_size,
+                total_chunks,
+                chunks_sent: total_chunks,
+            },
+        );
         self.echo_hashes.insert(rel_path, content_hash);
 
         Ok(())
@@ -712,7 +744,7 @@ impl FileSync {
         chunk_size: usize,
         rel_path: &str,
         full_path: &Path,
-    ) -> Result<(), FnsError> {
+    ) -> Result<usize, FnsError> {
         let file_data = std::fs::read(full_path)?;
         let total = file_data.len();
 
@@ -761,19 +793,36 @@ impl FileSync {
 
         info!(path = rel_path, chunks = chunk_index, "Upload complete");
 
-        Ok(())
+        Ok(total_chunks)
     }
 
     /// Handle FileUploadAck from server
     pub fn handle_upload_ack(&mut self, data: serde_json::Value) -> Result<(), FnsError> {
         let inner = extract_inner(&data);
-        let rel_path = inner
-            .get("path")
+        let rel_path = inner.get("path").and_then(|v| v.as_str()).unwrap_or("");
+
+        let session_id = inner
+            .get("sessionId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let path_from_session = if !session_id.is_empty() {
+            self.active_uploads
+                .remove(session_id)
+                .map(|session| session.path)
+        } else {
+            let matching_session = self
+                .active_uploads
+                .iter()
+                .find(|(_, session)| session.path == rel_path)
+                .map(|(id, session)| (id.clone(), session.path.clone()));
+            matching_session.and_then(|(id, path)| self.active_uploads.remove(&id).map(|_| path))
+        };
 
-        if !rel_path.is_empty() {
-            debug!(path = rel_path, "FileUploadAck");
+        if let Some(path) = path_from_session {
+            self.received_upload += 1;
+            debug!(path = path, "FileUploadAck");
+        } else if !rel_path.is_empty() {
+            debug!(path = rel_path, "FileUploadAck for unknown session");
         }
 
         Ok(())
@@ -782,10 +831,7 @@ impl FileSync {
     /// Handle FileDeleteAck from server
     pub fn handle_delete_ack(&mut self, data: serde_json::Value) -> Result<(), FnsError> {
         let inner = extract_inner(&data);
-        let rel_path = inner
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let rel_path = inner.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
         if !rel_path.is_empty() {
             debug!(path = rel_path, "FileDeleteAck");
@@ -810,6 +856,11 @@ impl FileSync {
             .and_then(|v| v.as_i64())
             .map(|v| v as usize)
             .unwrap_or(0);
+        self.expected_upload = inner
+            .get("needUploadCount")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as usize)
+            .unwrap_or(0);
 
         self.got_end = true;
 
@@ -817,6 +868,7 @@ impl FileSync {
             last_time = self.pending_last_time,
             need_modify = self.expected_modify,
             need_delete = self.expected_delete,
+            need_upload = self.expected_upload,
             "FileSyncEnd"
         );
 
@@ -824,13 +876,9 @@ impl FileSync {
     }
 
     /// Handle binary chunk from server
-    pub fn handle_binary_chunk(
-        &mut self,
-        data: &[u8],
-    ) -> Result<bool, FnsError> {
-        let parsed = BinaryChunkParser::parse(data).map_err(|e| FnsError::Protocol {
-            message: e,
-        })?;
+    pub fn handle_binary_chunk(&mut self, data: &[u8]) -> Result<bool, FnsError> {
+        let parsed =
+            BinaryChunkParser::parse(data).map_err(|e| FnsError::Protocol { message: e })?;
 
         let session_id = parsed.session_id.clone();
         let session = match self.active_downloads.get_mut(&session_id) {
@@ -838,9 +886,10 @@ impl FileSync {
             None => return Ok(false),
         };
 
-        let is_complete = session.reassembler.add_chunk(parsed).map_err(|e| FnsError::Protocol {
-            message: e,
-        })?;
+        let is_complete = session
+            .reassembler
+            .add_chunk(parsed)
+            .map_err(|e| FnsError::Protocol { message: e })?;
 
         if is_complete {
             let session = self
@@ -879,6 +928,7 @@ impl FileSync {
         self.echo_hashes.insert(session.path.clone(), hash);
 
         info!(path = session.path, "Chunked download complete");
+        self.received_modify += 1;
 
         Ok(())
     }
@@ -890,7 +940,7 @@ impl FileSync {
 
     /// Return the total number of files successfully synced (modify + delete)
     pub fn synced_count(&self) -> usize {
-        self.received_modify + self.received_delete
+        self.received_modify + self.received_delete + self.received_upload
     }
 
     /// Try to remove empty parent directories
@@ -900,7 +950,11 @@ impl FileSync {
             if p == self.vault_path {
                 break;
             }
-            if p.exists() && p.read_dir().map(|mut d| d.next().is_none()).unwrap_or(false) {
+            if p.exists()
+                && p.read_dir()
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false)
+            {
                 let _ = std::fs::remove_dir(p);
             } else {
                 break;
@@ -908,6 +962,13 @@ impl FileSync {
             parent = p.parent();
         }
     }
+}
+
+fn is_dot_prefixed_path(path: &str) -> bool {
+    path.split('/')
+        .next()
+        .map(|s| s.starts_with('.'))
+        .unwrap_or(false)
 }
 
 /// Extract inner data from server response

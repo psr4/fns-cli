@@ -1,20 +1,38 @@
-/// DJB2-style hash algorithm with Unicode code points
-/// Matches the behavior of Python implementation
-/// Uses Unicode code points (ord(ch) in Python)
+/// DJB2-style hash algorithm matching the server/JS implementation.
+/// String hashes use UTF-16 code units (JavaScript charCodeAt semantics).
 
-/// Computes a 32-bit signed integer hash of a string using DJB2 algorithm
-/// with Unicode code points (matching Python behavior)
+const FILE_HASH_THRESHOLD: usize = 10 * 1024 * 1024;
+const FILE_HASH_SLICE_SIZE: usize = 5 * 1024 * 1024;
+
+/// Computes a 32-bit signed integer hash of a string using UTF-16 code units.
 pub fn hash_content(content: &str) -> String {
     let mut hash: i32 = 0;
-    
-    // Use Unicode code points (same as Python's ord(ch))
-    for ch in content.chars() {
-        let char_val = ch as i32;
-        // DJB2: hash = (hash << 5) - hash + char
-        // i32 overflow handles the wrap-around automatically (same as Python)
-        hash = (hash << 5).wrapping_sub(hash).wrapping_add(char_val);
+
+    for unit in content.encode_utf16() {
+        hash = (hash << 5).wrapping_sub(hash).wrapping_add(unit as i32);
     }
-    
+
+    hash.to_string()
+}
+
+pub fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hash: i32 = 0;
+
+    let ranges: Vec<&[u8]> = if bytes.len() <= FILE_HASH_THRESHOLD {
+        vec![bytes]
+    } else {
+        vec![
+            &bytes[..FILE_HASH_SLICE_SIZE],
+            &bytes[bytes.len() - FILE_HASH_SLICE_SIZE..],
+        ]
+    };
+
+    for range in ranges {
+        for &byte in range {
+            hash = (hash << 5).wrapping_sub(hash).wrapping_add(byte as i32);
+        }
+    }
+
     hash.to_string()
 }
 
@@ -34,9 +52,7 @@ mod tests {
 
     #[test]
     fn test_hash_emoji() {
-        // Emoji test: 🚀 is U+1F680 (128640)
-        // Python produces "-538783611" using ord(ch) for code points
-        assert_eq!(hash_content("Fast Note Sync 🚀"), "-538783611");
+        assert_eq!(hash_content("Fast Note Sync 🚀"), "475362430");
     }
 
     #[test]
@@ -61,6 +77,12 @@ mod tests {
     #[test]
     fn test_hash_path_function() {
         assert_eq!(hash_path("hello"), hash_content("hello"));
+    }
+
+    #[test]
+    fn test_hash_bytes_hashes_raw_bytes() {
+        let bytes = [0x89, b'P', b'N', b'G', 0xff, 0x00];
+        assert_eq!(hash_bytes(&bytes), "-296492095");
     }
 
     #[test]

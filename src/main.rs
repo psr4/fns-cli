@@ -5,8 +5,8 @@ mod hash;
 mod http;
 mod logging;
 mod progress;
-mod signal;
 mod protocol;
+mod signal;
 mod state;
 mod sync;
 mod watcher;
@@ -24,14 +24,14 @@ fn format_timestamp(timestamp: i64) -> String {
     if timestamp == 0 {
         return "Never".to_string();
     }
-    
+
     let seconds = timestamp % 60;
     let minutes = (timestamp / 60) % 60;
     let hours = (timestamp / 3600) % 24;
-    
+
     let mut days_since_epoch = timestamp / 86400;
     let mut year = 1970;
-    
+
     loop {
         let days_in_year = if is_leap_year(year) { 366 } else { 365 };
         if days_since_epoch < days_in_year {
@@ -40,9 +40,9 @@ fn format_timestamp(timestamp: i64) -> String {
         days_since_epoch -= days_in_year;
         year += 1;
     }
-    
+
     let (month, day) = day_of_year_to_month_day(days_since_epoch as i32, year);
-    
+
     format!(
         "{}-{:02}-{:02} {:02}:{:02}:{:02}",
         year, month, day, hours, minutes, seconds
@@ -59,7 +59,7 @@ fn day_of_year_to_month_day(day_of_year: i32, year: i32) -> (i32, i32) {
     } else {
         [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
-    
+
     let mut remaining_days = day_of_year;
     for (month_idx, &days_in_month) in days_in_months.iter().enumerate() {
         if remaining_days < days_in_month {
@@ -71,11 +71,12 @@ fn day_of_year_to_month_day(day_of_year: i32, year: i32) -> (i32, i32) {
 }
 
 fn run_status(args: &Cli) -> ExitCode {
-    let config_path = args.config
+    let config_path = args
+        .config
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "config.yaml".to_string());
-    
+
     let config = match AppConfig::load(&config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -83,12 +84,12 @@ fn run_status(args: &Cli) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    
+
     let vault_path = config.vault_path();
     let state_path = vault_path.join(".fns_state.json");
     let state = SyncState::load(&state_path);
     let ws_url = config.ws_api();
-    
+
     println!("FastNodeSync CLI v{}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("Configuration:");
@@ -101,29 +102,38 @@ fn run_status(args: &Cli) -> ExitCode {
     println!("  Sync config  : {}", config.sync.sync_config);
     println!();
     println!("Sync state:");
-    println!("  Last note sync    : {}", format_timestamp(state.last_note_sync_time));
-    println!("  Last file sync    : {}", format_timestamp(state.last_file_sync_time));
-    println!("  Last setting sync : {}", format_timestamp(state.last_setting_sync_time));
-    
+    println!(
+        "  Last note sync    : {}",
+        format_timestamp(state.last_note_sync_time)
+    );
+    println!(
+        "  Last file sync    : {}",
+        format_timestamp(state.last_file_sync_time)
+    );
+    println!(
+        "  Last setting sync : {}",
+        format_timestamp(state.last_setting_sync_time)
+    );
+
     if vault_path.exists() {
         let md_count = walkdir::WalkDir::new(&vault_path)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
             .count();
-        
+
         let total_files = walkdir::WalkDir::new(&vault_path)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_file())
             .count();
-        
+
         println!();
         println!("Local vault:");
         println!("  Notes (.md)  : {}", md_count);
         println!("  Total files  : {}", total_files);
     }
-    
+
     ExitCode::SUCCESS
 }
 
@@ -144,7 +154,8 @@ fn main() -> ExitCode {
 }
 
 fn run_pull_command(args: &Cli) -> ExitCode {
-    let config_path = args.config
+    let config_path = args
+        .config
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "config.yaml".to_string());
@@ -196,7 +207,8 @@ fn run_pull_command(args: &Cli) -> ExitCode {
 }
 
 fn run_push_command(args: &Cli) -> ExitCode {
-    let config_path = args.config
+    let config_path = args
+        .config
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "config.yaml".to_string());
@@ -248,7 +260,8 @@ fn run_push_command(args: &Cli) -> ExitCode {
 }
 
 fn run_sync_command(args: &Cli) -> ExitCode {
-    let config_path = args.config
+    let config_path = args
+        .config
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "config.yaml".to_string());
@@ -300,7 +313,8 @@ fn run_sync_command(args: &Cli) -> ExitCode {
 }
 
 fn run_run_command(args: &Cli) -> ExitCode {
-    let config_path = args.config
+    let config_path = args
+        .config
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "config.yaml".to_string());
@@ -320,9 +334,7 @@ fn run_run_command(args: &Cli) -> ExitCode {
 
     let result = tokio::runtime::Runtime::new()
         .expect("Failed to create tokio runtime")
-        .block_on(async {
-            run_continuous_sync(config).await
-        });
+        .block_on(async { run_continuous_sync(config).await });
 
     match result {
         Ok(sync_result) => {
@@ -352,25 +364,25 @@ async fn run_continuous_sync(config: AppConfig) -> Result<sync::SyncResult, erro
     // Create shutdown signal handler
     let (_shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
     let (_signal_sender, mut shutdown) = signal::ShutdownSignal::new();
-    
+
     // Create file watcher
     let vault_path = config.vault_path();
     let exclude_patterns = config.sync.exclude_patterns.clone();
     let (watcher, watch_rx) = FileWatcher::new(vault_path.clone(), exclude_patterns)?;
-    
+
     // Start watching
     let mut watcher = watcher;
     watcher.start()?;
-    
+
     // CRITICAL: Start the event processing loop in a separate thread
     let _watcher_handle = std::thread::spawn(move || {
         watcher.run();
     });
-    
+
     let mut coordinator = SyncCoordinator::new(config);
-    
+
     let (tx, watch_rx_tokio) = tokio::sync::mpsc::channel::<WatchEvent>(100);
-    
+
     let _bridge_handle = tokio::task::spawn_blocking(move || {
         while let Ok(event) = watch_rx.recv() {
             if tx.blocking_send(event).is_err() {
@@ -378,9 +390,9 @@ async fn run_continuous_sync(config: AppConfig) -> Result<sync::SyncResult, erro
             }
         }
     });
-    
+
     println!("Initial sync complete. Watching for changes...");
-    
+
     // Wait for either sync to complete or shutdown signal
     let _result = tokio::select! {
         r = coordinator.run_continuous(watch_rx_tokio, shutdown_rx) => r?,
@@ -389,7 +401,7 @@ async fn run_continuous_sync(config: AppConfig) -> Result<sync::SyncResult, erro
             sync::SyncResult::default()
         }
     };
-    
+
     // Force exit - don't wait for threads to clean up
     std::process::exit(0);
 }

@@ -6,21 +6,19 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracing::{debug, info, warn};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::protocol::Message;
+use tracing::{debug, info, warn};
 
 use crate::error::FnsError;
 use crate::hash::{hash_content, hash_path};
 use crate::protocol::{
-    Action, ClientAction, ServerAction,
-    NoteSyncRequest, NoteSyncCheck,
-    NoteModifyRequest, NoteDeleteRequest,
-    encode_message, decode_message,
+    Action, ClientAction, NoteDeleteRequest, NoteModifyRequest, NoteSyncCheck, NoteSyncRequest,
+    ServerAction, decode_message, encode_message,
 };
 use crate::state::SyncState;
 use crate::ws_client::WsStream;
@@ -62,6 +60,37 @@ pub struct NoteSync {
     got_end: bool,
     /// Pending last sync time to commit.
     pending_last_time: i64,
+}
+
+async fn read_stable_note_content(path: &Path) -> Result<String, std::io::Error> {
+    const MAX_ATTEMPTS: usize = 5;
+    const STABLE_DELAY: Duration = Duration::from_millis(150);
+
+    let mut last_len: Option<u64> = None;
+    let mut last_modified: Option<SystemTime> = None;
+    let mut last_content = String::new();
+
+    for attempt in 0..MAX_ATTEMPTS {
+        let content = fs::read_to_string(path)?;
+        let metadata = fs::metadata(path)?;
+        let modified = metadata.modified().ok();
+        let is_stable = Some(metadata.len()) == last_len && modified == last_modified;
+        let is_last_attempt = attempt + 1 == MAX_ATTEMPTS;
+
+        if is_stable && (!content.is_empty() || is_last_attempt) {
+            return Ok(content);
+        }
+
+        last_len = Some(metadata.len());
+        last_modified = modified;
+        last_content = content;
+
+        if !is_last_attempt {
+            tokio::time::sleep(STABLE_DELAY).await;
+        }
+    }
+
+    Ok(last_content)
 }
 
 impl NoteSync {
@@ -123,9 +152,14 @@ impl NoteSync {
         };
 
         let msg = encode_message(&Action::Client(ClientAction::NoteSync), &request)?;
-        info!(last_time = last_sync_time, note_count = request.notes.len(), "Requesting NoteSync");
+        info!(
+            last_time = last_sync_time,
+            note_count = request.notes.len(),
+            "Requesting NoteSync"
+        );
 
-        ws.send(Message::Text(msg.into())).await
+        ws.send(Message::Text(msg.into()))
+            .await
             .map_err(|e| FnsError::WebSocket {
                 message: format!("Failed to send NoteSync: {}", e),
             })?;
@@ -155,7 +189,8 @@ impl NoteSync {
         let msg = encode_message(&Action::Client(ClientAction::NoteSync), &request)?;
         info!(note_count = request.notes.len(), "Requesting full NoteSync");
 
-        ws.send(Message::Text(msg.into())).await
+        ws.send(Message::Text(msg.into()))
+            .await
             .map_err(|e| FnsError::WebSocket {
                 message: format!("Failed to send full NoteSync: {}", e),
             })?;
@@ -244,24 +279,25 @@ impl NoteSync {
     pub fn handle_note_modify(&mut self, msg_data: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg_data);
 
-        let rel_path: String = data.get("path")
+        let rel_path: String = data
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let content: String = data.get("content")
+        let content: String = data
+            .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let content_hash: String = data.get("contentHash")
+        let content_hash: String = data
+            .get("contentHash")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let mtime: i64 = data.get("mtime")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let mtime: i64 = data.get("mtime").and_then(|v| v.as_i64()).unwrap_or(0);
 
         if rel_path.is_empty() {
             return Ok(());
@@ -292,7 +328,9 @@ impl NoteSync {
         // Set mtime if provided
         if mtime > 0 {
             let ts = UNIX_EPOCH + std::time::Duration::from_millis(mtime as u64);
-            if let Err(e) = filetime::set_file_mtime(&full_path, filetime::FileTime::from_system_time(ts)) {
+            if let Err(e) =
+                filetime::set_file_mtime(&full_path, filetime::FileTime::from_system_time(ts))
+            {
                 warn!(path = %rel_path, error = %e, "Failed to set mtime");
             }
         }
@@ -308,7 +346,8 @@ impl NoteSync {
     pub fn handle_note_delete(&mut self, msg_data: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg_data);
 
-        let rel_path: String = data.get("path")
+        let rel_path: String = data
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
@@ -332,7 +371,8 @@ impl NoteSync {
             self.try_remove_empty_parent(&full_path);
         }
 
-        self.echo_hashes.insert(rel_path, DELETED_MARKER.to_string());
+        self.echo_hashes
+            .insert(rel_path, DELETED_MARKER.to_string());
 
         Ok(())
     }
@@ -341,12 +381,14 @@ impl NoteSync {
     pub fn handle_note_rename(&mut self, msg_data: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg_data);
 
-        let old_path: String = data.get("oldPath")
+        let old_path: String = data
+            .get("oldPath")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let new_path: String = data.get("path")
+        let new_path: String = data
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
@@ -356,7 +398,8 @@ impl NoteSync {
         }
 
         // Mark old path as deleted in echo cache
-        self.echo_hashes.insert(old_path.clone(), DELETED_MARKER.to_string());
+        self.echo_hashes
+            .insert(old_path.clone(), DELETED_MARKER.to_string());
 
         let old_full = self.vault_path.join(&old_path);
         let new_full = self.vault_path.join(&new_path);
@@ -388,14 +431,13 @@ impl NoteSync {
     pub fn handle_note_mtime(&mut self, msg_data: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg_data);
 
-        let rel_path: String = data.get("path")
+        let rel_path: String = data
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
 
-        let mtime: i64 = data.get("mtime")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let mtime: i64 = data.get("mtime").and_then(|v| v.as_i64()).unwrap_or(0);
 
         if rel_path.is_empty() || mtime == 0 {
             return Ok(());
@@ -404,7 +446,9 @@ impl NoteSync {
         let full_path = self.vault_path.join(&rel_path);
         if full_path.exists() {
             let ts = UNIX_EPOCH + std::time::Duration::from_millis(mtime as u64);
-            if let Err(e) = filetime::set_file_mtime(&full_path, filetime::FileTime::from_system_time(ts)) {
+            if let Err(e) =
+                filetime::set_file_mtime(&full_path, filetime::FileTime::from_system_time(ts))
+            {
                 warn!(path = %rel_path, error = %e, "Failed to set mtime");
             }
         }
@@ -420,7 +464,8 @@ impl NoteSync {
     ) -> Result<(), FnsError> {
         let data = extract_inner(msg_data);
 
-        let rel_path: String = data.get("path")
+        let rel_path: String = data
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
@@ -440,19 +485,20 @@ impl NoteSync {
     fn handle_sync_end(&mut self, msg_data: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg_data);
 
-        let last_time: i64 = data.get("lastTime")
+        let last_time: i64 = data.get("lastTime").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        let need_modify_count: i64 = data
+            .get("needModifyCount")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
-        let need_modify_count: i64 = data.get("needModifyCount")
+        let need_delete_count: i64 = data
+            .get("needDeleteCount")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
-        let need_delete_count: i64 = data.get("needDeleteCount")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-
-        let need_upload_count: i64 = data.get("needUploadCount")
+        let need_upload_count: i64 = data
+            .get("needUploadCount")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
@@ -500,7 +546,7 @@ impl NoteSync {
             return Ok(());
         }
 
-        let content = match fs::read_to_string(&full_path) {
+        let content = match read_stable_note_content(&full_path).await {
             Ok(c) => c,
             Err(e) => {
                 warn!(path = rel_path, error = %e, "Failed to read note file");
@@ -517,12 +563,14 @@ impl NoteSync {
         }
 
         let metadata = fs::metadata(&full_path)?;
-        let ctime = metadata.created()
+        let ctime = metadata
+            .created()
             .unwrap_or(SystemTime::UNIX_EPOCH)
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        let mtime = metadata.modified()
+        let mtime = metadata
+            .modified()
             .unwrap_or(SystemTime::UNIX_EPOCH)
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -544,7 +592,8 @@ impl NoteSync {
         debug!("NoteModify JSON: {}", msg);
         info!(path = rel_path, "NoteModify -> server");
 
-        ws.send(Message::Text(msg.into())).await
+        ws.send(Message::Text(msg.into()))
+            .await
             .map_err(|e| FnsError::WebSocket {
                 message: format!("Failed to send NoteModify: {}", e),
             })?;
@@ -556,11 +605,7 @@ impl NoteSync {
     }
 
     /// Push a local note deletion to the server.
-    pub async fn push_delete(
-        &mut self,
-        ws: &mut WsStream,
-        rel_path: &str,
-    ) -> Result<(), FnsError> {
+    pub async fn push_delete(&mut self, ws: &mut WsStream, rel_path: &str) -> Result<(), FnsError> {
         // Clear any existing entry for this path
         self.echo_hashes.remove(rel_path);
 
@@ -573,12 +618,14 @@ impl NoteSync {
         let msg = encode_message(&Action::Client(ClientAction::NoteDelete), &request)?;
         info!(path = rel_path, "NoteDelete -> server");
 
-        ws.send(Message::Text(msg.into())).await
+        ws.send(Message::Text(msg.into()))
+            .await
             .map_err(|e| FnsError::WebSocket {
                 message: format!("Failed to send NoteDelete: {}", e),
             })?;
 
-        self.echo_hashes.insert(rel_path.to_string(), DELETED_MARKER.to_string());
+        self.echo_hashes
+            .insert(rel_path.to_string(), DELETED_MARKER.to_string());
 
         Ok(())
     }
@@ -662,8 +709,12 @@ impl NoteSync {
     }
 
     /// Collect .md files modified after last_sync_time (for incremental sync).
-    fn collect_local_notes_filtered(&self, last_sync_time: i64) -> Result<Vec<NoteSyncCheck>, FnsError> {
-        let notes = self.enumerate_md_files()?
+    fn collect_local_notes_filtered(
+        &self,
+        last_sync_time: i64,
+    ) -> Result<Vec<NoteSyncCheck>, FnsError> {
+        let notes = self
+            .enumerate_md_files()?
             .into_iter()
             .filter(|note| note.mtime > last_sync_time)
             .collect();
@@ -723,7 +774,8 @@ impl NoteSync {
                 Err(_) => continue,
             };
 
-            let mtime = metadata.modified()
+            let mtime = metadata
+                .modified()
                 .unwrap_or(SystemTime::UNIX_EPOCH)
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -748,6 +800,10 @@ impl NoteSync {
 
     /// Check if a relative path matches any exclude pattern.
     fn is_excluded(&self, rel: &str) -> bool {
+        if rel.contains(".~#") {
+            return true;
+        }
+
         for pattern in &self.exclude_patterns {
             // Handle directory patterns ending with /**
             if let Some(dir_name) = pattern.strip_suffix("/**") {
@@ -755,9 +811,11 @@ impl NoteSync {
                     return true;
                 }
             }
-            // Handle file patterns like *.tmp
+            // Handle file patterns like *.tmp. Treat .tmp.* variants as
+            // transient files too (for example: note.md.tmp.w_3o8rmv).
             if let Some(ext) = pattern.strip_prefix("*.") {
-                if rel.ends_with(&format!(".{}", ext)) {
+                let suffix = format!(".{}", ext);
+                if rel.ends_with(&suffix) || rel.contains(&format!("{}.", suffix)) {
                     return true;
                 }
             }
@@ -782,7 +840,6 @@ fn extract_inner(msg_data: &serde_json::Value) -> &serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::tempdir;
 
     #[test]
@@ -807,13 +864,19 @@ mod tests {
             PathBuf::from("/vault"),
             SyncState::default(),
             "test".to_string(),
-            vec![".git/**".to_string(), ".trash/**".to_string(), "*.tmp".to_string()],
+            vec![
+                ".git/**".to_string(),
+                ".trash/**".to_string(),
+                "*.tmp".to_string(),
+            ],
         );
 
         assert!(sync.is_excluded(".git/config"));
         assert!(sync.is_excluded(".git/objects/abc"));
         assert!(sync.is_excluded(".trash/old.md"));
         assert!(sync.is_excluded("notes/temp.tmp"));
+        assert!(sync.is_excluded("notes/hello.md.tmp.w_3o8rmv"));
+        assert!(sync.is_excluded("notes/hello.md.~#0"));
         assert!(!sync.is_excluded("notes/hello.md"));
         assert!(!sync.is_excluded(".obsidian/app.json"));
     }
@@ -836,12 +899,7 @@ mod tests {
         // Create non-md file (should be skipped)
         fs::write(vault_path.join("notes/data.txt"), "data").unwrap();
 
-        let sync = NoteSync::new(
-            vault_path,
-            SyncState::default(),
-            "test".to_string(),
-            vec![],
-        );
+        let sync = NoteSync::new(vault_path, SyncState::default(), "test".to_string(), vec![]);
 
         let notes = sync.enumerate_md_files().unwrap();
 
@@ -867,7 +925,8 @@ mod tests {
         );
 
         // Add an entry to echo_hashes
-        sync.echo_hashes.insert("notes/hello.md".to_string(), "12345".to_string());
+        sync.echo_hashes
+            .insert("notes/hello.md".to_string(), "12345".to_string());
 
         // Simulate receiving the same content
         let msg = serde_json::json!({
@@ -880,7 +939,10 @@ mod tests {
         });
 
         // Should be suppressed (no error, but file not written)
-        assert_eq!(sync.echo_hashes.get("notes/hello.md"), Some(&"12345".to_string()));
+        assert_eq!(
+            sync.echo_hashes.get("notes/hello.md"),
+            Some(&"12345".to_string())
+        );
         sync.handle_note_modify(&msg).ok(); // Ignore IO error since path doesn't exist
         assert_eq!(sync.echo_hashes.get("notes/hello.md"), None); // Should be removed
     }
@@ -889,7 +951,7 @@ mod tests {
     fn test_echo_cache_revert() {
         let dir = tempdir().unwrap();
         let vault_path = dir.path().to_path_buf();
-        
+
         let mut sync = NoteSync::new(
             vault_path.clone(),
             SyncState::default(),
@@ -899,20 +961,23 @@ mod tests {
 
         fs::create_dir_all(vault_path.join("notes")).unwrap();
         let note_path = vault_path.join("notes/test.md");
-        
+
         // Simulate push_modify with content "A"
         fs::write(&note_path, "content A").unwrap();
         let hash_a = hash_content("content A");
-        sync.echo_hashes.insert("notes/test.md".to_string(), hash_a.clone());
+        sync.echo_hashes
+            .insert("notes/test.md".to_string(), hash_a.clone());
 
         // Simulate push_modify with content "B" (user edits to B)
         fs::write(&note_path, "content B").unwrap();
         let hash_b = hash_content("content B");
-        sync.echo_hashes.insert("notes/test.md".to_string(), hash_b.clone());
+        sync.echo_hashes
+            .insert("notes/test.md".to_string(), hash_b.clone());
 
         // Simulate push_modify with content "A" again (user reverts to A)
         fs::write(&note_path, "content A").unwrap();
-        sync.echo_hashes.insert("notes/test.md".to_string(), hash_a.clone());
+        sync.echo_hashes
+            .insert("notes/test.md".to_string(), hash_a.clone());
 
         // Now simulate receiving the revert from server
         let msg = serde_json::json!({
@@ -935,7 +1000,7 @@ mod tests {
     fn test_echo_cache_tombstone_reuse() {
         let dir = tempdir().unwrap();
         let vault_path = dir.path().to_path_buf();
-        
+
         let mut sync = NoteSync::new(
             vault_path.clone(),
             SyncState::default(),
@@ -945,17 +1010,20 @@ mod tests {
 
         fs::create_dir_all(vault_path.join("notes")).unwrap();
         let note_path = vault_path.join("notes/test.md");
-        
+
         // Simulate push_delete (server deletes)
-        sync.echo_hashes.insert("notes/test.md".to_string(), DELETED_MARKER.to_string());
+        sync.echo_hashes
+            .insert("notes/test.md".to_string(), DELETED_MARKER.to_string());
 
         // Simulate push_modify (user recreates same path)
         fs::write(&note_path, "new content").unwrap();
         let hash_new = hash_content("new content");
-        sync.echo_hashes.insert("notes/test.md".to_string(), hash_new.clone());
+        sync.echo_hashes
+            .insert("notes/test.md".to_string(), hash_new.clone());
 
         // Simulate push_delete again (user deletes again)
-        sync.echo_hashes.insert("notes/test.md".to_string(), DELETED_MARKER.to_string());
+        sync.echo_hashes
+            .insert("notes/test.md".to_string(), DELETED_MARKER.to_string());
 
         // Now simulate receiving the delete from server
         let msg = serde_json::json!({
@@ -965,7 +1033,10 @@ mod tests {
         });
 
         // With HashMap, this should be suppressed (echo_hashes has __deleted__)
-        assert_eq!(sync.echo_hashes.get("notes/test.md"), Some(&DELETED_MARKER.to_string()));
+        assert_eq!(
+            sync.echo_hashes.get("notes/test.md"),
+            Some(&DELETED_MARKER.to_string())
+        );
         sync.handle_note_delete(&msg).unwrap();
         // Entry should be removed after echo suppression
         assert_eq!(sync.echo_hashes.get("notes/test.md"), None);

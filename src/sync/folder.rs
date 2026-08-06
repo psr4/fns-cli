@@ -11,8 +11,8 @@ use tracing::{debug, info};
 
 use crate::error::FnsError;
 use crate::protocol::{
-    decode_message, encode_message, Action, ClientAction, FolderSyncRequest, FolderSyncCheck,
-    ServerAction,
+    Action, ClientAction, FolderSyncCheck, FolderSyncRequest, ServerAction, decode_message,
+    encode_message,
 };
 use crate::state::SyncState;
 use crate::ws_client::WsStream;
@@ -80,10 +80,9 @@ impl FolderSync {
 
             match msg {
                 Message::Text(text) => {
-                    let (action, data) =
-                        decode_message(&text).map_err(|e| FnsError::Protocol {
-                            message: format!("Failed to decode message: {}", e),
-                        })?;
+                    let (action, data) = decode_message(&text).map_err(|e| FnsError::Protocol {
+                        message: format!("Failed to decode message: {}", e),
+                    })?;
 
                     match action {
                         Action::Server(ServerAction::FolderSyncModify) => {
@@ -171,10 +170,7 @@ impl FolderSync {
         Ok(())
     }
 
-    pub fn handle_folder_rename(
-        &mut self,
-        msg_data: &serde_json::Value,
-    ) -> Result<(), FnsError> {
+    pub fn handle_folder_rename(&mut self, msg_data: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg_data);
 
         let old_path: String = data
@@ -224,10 +220,7 @@ impl FolderSync {
     fn handle_sync_end(&mut self, msg_data: &serde_json::Value) -> Result<(), FnsError> {
         let data = extract_inner(msg_data);
 
-        let last_time: i64 = data
-            .get("lastTime")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let last_time: i64 = data.get("lastTime").and_then(|v| v.as_i64()).unwrap_or(0);
 
         let need_modify_count: i64 = data
             .get("needModifyCount")
@@ -327,7 +320,9 @@ impl FolderSync {
 
             folders.push(FolderSyncCheck {
                 path: rel,
-                path_hash: crate::hash::hash_path(&folders.last().map_or(String::new(), |f| f.path.clone())),
+                path_hash: crate::hash::hash_path(
+                    &folders.last().map_or(String::new(), |f| f.path.clone()),
+                ),
                 mtime,
             });
         }

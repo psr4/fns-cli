@@ -17,5 +17,5 @@ pub mod ws_client;
 pub use cli::{Cli, Commands};
 pub use config::AppConfig;
 pub use error::FnsError;
-pub use hash::{hash_content, hash_path};
+pub use hash::{hash_bytes, hash_content, hash_path};
 pub use state::SyncState;

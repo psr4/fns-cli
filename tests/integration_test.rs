@@ -2,11 +2,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use fns_cli::hash::{hash_content, hash_path};
-use fns_cli::config::AppConfig;
-use fns_cli::state::SyncState;
-use fns_cli::cli::{Cli, Commands};
 use clap::Parser;
+use fns_cli::cli::{Cli, Commands};
+use fns_cli::config::AppConfig;
+use fns_cli::hash::{hash_content, hash_path};
+use fns_cli::state::SyncState;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -20,9 +20,7 @@ mod hash_tests {
 
     #[test]
     fn test_hash_emoji_rocket() {
-        // Emoji test: 🚀 is U+1F680 (128640)
-        // Python produces "-538783611" using ord(ch) for code points
-        assert_eq!(hash_content("Fast Note Sync 🚀"), "-538783611");
+        assert_eq!(hash_content("Fast Note Sync 🚀"), "475362430");
     }
 
     #[test]
@@ -44,7 +42,10 @@ mod hash_tests {
     #[test]
     fn test_hash_path_function() {
         assert_eq!(hash_path("hello"), hash_content("hello"));
-        assert_eq!(hash_path("Fast Note Sync 🚀"), hash_content("Fast Note Sync 🚀"));
+        assert_eq!(
+            hash_path("Fast Note Sync 🚀"),
+            hash_content("Fast Note Sync 🚀")
+        );
     }
 
     #[test]
@@ -88,12 +89,12 @@ sync:
   watch_path: "/path/to/vault"
 "#;
         let (_temp_dir, config_path) = create_temp_config(yaml);
-        
+
         unsafe {
             std::env::remove_var("FNS_API");
             std::env::remove_var("FNS_TOKEN");
         }
-        
+
         let config = AppConfig::load(config_path.to_str().unwrap()).unwrap();
         assert_eq!(config.server.api, "https://api.example.com");
         assert_eq!(config.server.token, "test-token-123");
@@ -111,12 +112,12 @@ server:
   vault: "myVault"
 "#;
         let (_temp_dir, config_path) = create_temp_config(yaml);
-        
+
         unsafe {
             std::env::remove_var("FNS_API");
             std::env::remove_var("FNS_TOKEN");
         }
-        
+
         let config = AppConfig::load(config_path.to_str().unwrap()).unwrap();
         assert!(config.sync.sync_notes);
         assert!(config.sync.sync_files);
@@ -137,14 +138,14 @@ server:
   vault: "myVault"
 "#;
         let (_temp_dir, config_path) = create_temp_config(yaml);
-        
+
         unsafe {
             std::env::set_var("FNS_API", "https://env-api.example.com");
         }
-        
+
         let config = AppConfig::load(config_path.to_str().unwrap()).unwrap();
         assert_eq!(config.server.api, "https://env-api.example.com");
-        
+
         unsafe {
             std::env::remove_var("FNS_API");
         }
@@ -160,14 +161,14 @@ server:
   vault: "myVault"
 "#;
         let (_temp_dir, config_path) = create_temp_config(yaml);
-        
+
         unsafe {
             std::env::set_var("FNS_TOKEN", "env-token-xyz");
         }
-        
+
         let config = AppConfig::load(config_path.to_str().unwrap()).unwrap();
         assert_eq!(config.server.token, "env-token-xyz");
-        
+
         unsafe {
             std::env::remove_var("FNS_TOKEN");
         }
@@ -183,12 +184,12 @@ server:
   vault: "myVault"
 "#;
         let (_temp_dir, config_path) = create_temp_config(yaml);
-        
+
         unsafe {
             std::env::remove_var("FNS_API");
             std::env::remove_var("FNS_TOKEN");
         }
-        
+
         let result = AppConfig::load(config_path.to_str().unwrap());
         assert!(result.is_err());
     }
@@ -203,12 +204,12 @@ server:
   vault: "myVault"
 "#;
         let (_temp_dir, config_path) = create_temp_config(yaml);
-        
+
         unsafe {
             std::env::remove_var("FNS_API");
             std::env::remove_var("FNS_TOKEN");
         }
-        
+
         let result = AppConfig::load(config_path.to_str().unwrap());
         assert!(result.is_err());
     }
@@ -223,12 +224,12 @@ server:
   vault: "myVault"
 "#;
         let (_temp_dir, config_path) = create_temp_config(yaml);
-        
+
         unsafe {
             std::env::remove_var("FNS_API");
             std::env::remove_var("FNS_TOKEN");
         }
-        
+
         let config = AppConfig::load(config_path.to_str().unwrap()).unwrap();
         assert_eq!(config.ws_api(), "wss://server.example.com");
     }
@@ -243,12 +244,12 @@ server:
   vault: "myVault"
 "#;
         let (_temp_dir, config_path) = create_temp_config(yaml);
-        
+
         unsafe {
             std::env::remove_var("FNS_API");
             std::env::remove_var("FNS_TOKEN");
         }
-        
+
         let config = AppConfig::load(config_path.to_str().unwrap()).unwrap();
         assert_eq!(config.ws_api(), "ws://localhost:8080");
     }
@@ -269,12 +270,12 @@ sync:
   file_chunk_size: 1048576
 "#;
         let (_temp_dir, config_path) = create_temp_config(yaml);
-        
+
         unsafe {
             std::env::remove_var("FNS_API");
             std::env::remove_var("FNS_TOKEN");
         }
-        
+
         let config = AppConfig::load(config_path.to_str().unwrap()).unwrap();
         assert!(!config.sync.sync_notes);
         assert!(!config.sync.sync_files);
@@ -329,13 +330,16 @@ mod state_tests {
         };
 
         original.save(&state_path).unwrap();
-        
+
         assert!(state_path.exists());
-        
+
         let loaded = SyncState::load(&state_path);
         assert_eq!(loaded.last_note_sync_time, original.last_note_sync_time);
         assert_eq!(loaded.last_file_sync_time, original.last_file_sync_time);
-        assert_eq!(loaded.last_setting_sync_time, original.last_setting_sync_time);
+        assert_eq!(
+            loaded.last_setting_sync_time,
+            original.last_setting_sync_time
+        );
     }
 
     #[test]
@@ -383,10 +387,10 @@ mod state_tests {
         };
 
         state.save(&state_path).unwrap();
-        
+
         let loaded_content = std::fs::read_to_string(&state_path).unwrap();
         let loaded_state: SyncState = serde_json::from_str(&loaded_content).unwrap();
-        
+
         assert_eq!(loaded_state.last_note_sync_time, 1);
         assert_eq!(loaded_state.last_file_sync_time, 2);
         assert_eq!(loaded_state.last_setting_sync_time, 3);

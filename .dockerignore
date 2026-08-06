@@ -1,0 +1,8 @@
+.git
+.sisyphus
+target/debug
+target/release/build
+target/release/deps
+target/release/examples
+target/release/incremental
+target/tmp

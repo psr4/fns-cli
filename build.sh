@@ -2,7 +2,16 @@
 
 set -e
 
-docker run --rm -it -v ./:/app rust:1.86 bash -c "cd /app && cargo build --release"
+docker volume create fns-cli-cargo-registry >/dev/null
+docker volume create fns-cli-cargo-git >/dev/null
+
+docker run --rm \
+  -v "$(pwd):/app" \
+  -v fns-cli-cargo-registry:/usr/local/cargo/registry \
+  -v fns-cli-cargo-git:/usr/local/cargo/git \
+  -w /app \
+  rust:1.86 \
+  cargo build --release
 
 docker build . -t fns-cli
 
