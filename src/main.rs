@@ -367,7 +367,16 @@ async fn run_continuous_sync(config: AppConfig) -> Result<sync::SyncResult, erro
 
     // Create file watcher
     let vault_path = config.vault_path();
-    let exclude_patterns = config.sync.exclude_patterns.clone();
+    let mut exclude_patterns = config.sync.exclude_patterns.clone();
+    if !config.sync.sync_config {
+        exclude_patterns.extend(
+            config
+                .sync
+                .config_sync_dirs
+                .iter()
+                .map(|dir| format!("{}/**", dir)),
+        );
+    }
     let (watcher, watch_rx) = FileWatcher::new(vault_path.clone(), exclude_patterns)?;
 
     // Start watching

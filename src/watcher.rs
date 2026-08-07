@@ -535,13 +535,20 @@ mod tests {
     #[test]
     fn test_is_excluded_custom_patterns() {
         let vault_path = PathBuf::from("/vault");
-        let patterns = vec!["*.tmp".to_string(), "drafts/**".to_string()];
+        let patterns = vec![
+            "*.tmp".to_string(),
+            "drafts/**".to_string(),
+            ".obsidian/**".to_string(),
+        ];
         let (watcher, _rx) = FileWatcher::new(vault_path, patterns).unwrap();
 
         assert!(watcher.is_excluded(&PathBuf::from("/vault/file.tmp")));
         assert!(watcher.is_excluded(&PathBuf::from("/vault/file.md.tmp.w_3o8rmv")));
         assert!(watcher.is_excluded(&PathBuf::from("/vault/file.md.~#0")));
         assert!(watcher.is_excluded(&PathBuf::from("/vault/drafts/note.md")));
+        assert!(watcher.is_excluded(&PathBuf::from(
+            "/vault/.obsidian/plugins/fast-note-sync/data.json"
+        )));
         assert!(!watcher.is_excluded(&PathBuf::from("/vault/notes.md")));
     }
 

@@ -314,6 +314,7 @@ pub struct NoteSyncCheck {
     pub path_hash: String,
     #[serde(rename = "contentHash")]
     pub content_hash: String,
+    pub ctime: i64,
     pub mtime: i64,
 }
 

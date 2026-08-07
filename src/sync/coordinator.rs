@@ -519,6 +519,9 @@ impl SyncCoordinator {
             ServerAction::SettingSyncEnd => {
                 self.setting_sync.handle_setting_end(&data)?;
             }
+            ServerAction::SettingModifyAck => {
+                self.setting_sync.handle_setting_modify_ack(&data);
+            }
             _ => {
                 if matches!(
                     action,
@@ -719,6 +722,9 @@ impl SyncCoordinator {
             return true;
         }
         if rel.starts_with(".tmp") || rel.ends_with(".tmp") || rel.contains(".tmp.") {
+            return true;
+        }
+        if !self.config.sync.sync_config && self.is_config_file(rel) {
             return true;
         }
 
@@ -1177,7 +1183,7 @@ impl SyncCoordinator {
                             self.setting_sync.handle_setting_delete(&data)?;
                         }
                         ServerAction::SettingModifyAck => {
-                            debug!("Received SettingModifyAck");
+                            self.setting_sync.handle_setting_modify_ack(&data);
                         }
                         _ => {
                             debug!(action = ?server_action, "Ignoring server action in continuous mode");
@@ -1269,6 +1275,18 @@ mod tests {
         assert!(coordinator.is_excluded("notes/hello.md.~#0"));
         assert!(!coordinator.is_excluded("notes/hello.md"));
         assert!(!coordinator.is_excluded(".obsidian/app.json"));
+    }
+
+    #[test]
+    fn test_config_paths_excluded_when_config_sync_disabled() {
+        let mut config = AppConfig::default();
+        config.sync.sync_config = false;
+
+        let coordinator = SyncCoordinator::new(config);
+
+        assert!(coordinator.is_excluded(".obsidian/plugins/fast-note-sync/data.json"));
+        assert!(coordinator.is_excluded(".agents/config.yaml"));
+        assert!(!coordinator.is_excluded("notes/hello.md"));
     }
 
     #[test]

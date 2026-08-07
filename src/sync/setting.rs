@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,12 +49,18 @@ pub struct SettingSync {
     expected_delete: usize,
     /// Expected upload count from SettingSyncEnd
     expected_upload: usize,
+    /// Expected mtime-only update count from SettingSyncEnd
+    expected_mtime: usize,
     /// Received modify count
     received_modify: usize,
     /// Received delete count
     received_delete: usize,
     /// Received upload count
     received_upload: usize,
+    /// Received mtime-only update count
+    received_mtime: usize,
+    /// NeedUpload paths awaiting SettingModifyAck
+    pending_uploads: HashSet<String>,
     /// Got SettingSyncEnd message
     got_end: bool,
     /// Pending last sync time to commit
@@ -79,9 +85,12 @@ impl SettingSync {
             expected_modify: 0,
             expected_delete: 0,
             expected_upload: 0,
+            expected_mtime: 0,
             received_modify: 0,
             received_delete: 0,
             received_upload: 0,
+            received_mtime: 0,
+            pending_uploads: HashSet::new(),
             got_end: false,
             pending_last_time: 0,
         }
@@ -439,6 +448,9 @@ impl SettingSync {
             }
         }
 
+        self.received_mtime += 1;
+        self.check_all_received();
+
         Ok(())
     }
 
@@ -449,28 +461,38 @@ impl SettingSync {
         msg: &serde_json::Value,
     ) -> Result<(), FnsError> {
         let data = extract_inner(msg);
+        let mut paths = Vec::new();
 
-        let need_upload = data
-            .get("needUpload")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        if let Some(rel_path) = data.get("path").and_then(|v| v.as_str()) {
+            paths.push(rel_path.to_string());
+        }
 
-        info!(count = need_upload.len(), "<- SettingSyncNeedUpload");
+        if let Some(need_upload) = data.get("needUpload").and_then(|v| v.as_array()) {
+            for item in need_upload {
+                let rel_path = if let Some(obj) = item.as_object() {
+                    obj.get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    item.as_str().unwrap_or_default().to_string()
+                };
 
-        for item in need_upload {
-            let rel_path = if let Some(obj) = item.as_object() {
-                obj.get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string()
-            } else {
-                item.as_str().unwrap_or_default().to_string()
-            };
+                paths.push(rel_path);
+            }
+        }
 
+        info!(count = paths.len(), "<- SettingSyncNeedUpload");
+
+        for rel_path in paths {
             if !rel_path.is_empty() {
-                self.push_modify(ws, &rel_path, false).await?;
-                self.received_upload += 1;
+                let full_path = self.vault_path.join(&rel_path);
+                if full_path.exists() && Self::is_text_file(&full_path) {
+                    self.pending_uploads.insert(rel_path.clone());
+                    self.push_modify(ws, &rel_path, true).await?;
+                } else {
+                    self.received_upload += 1;
+                }
             }
         }
 
@@ -499,11 +521,17 @@ impl SettingSync {
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
+        let need_sync_mtime_count: i64 = data
+            .get("needSyncMtimeCount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
         info!(
             last_time = last_time,
             need_modify = need_modify_count,
             need_delete = need_delete_count,
             need_upload = need_upload_count,
+            need_sync_mtime = need_sync_mtime_count,
             "<- SettingSyncEnd"
         );
 
@@ -511,9 +539,13 @@ impl SettingSync {
         self.expected_modify = need_modify_count as usize;
         self.expected_delete = need_delete_count as usize;
         self.expected_upload = need_upload_count as usize;
+        self.expected_mtime = need_sync_mtime_count as usize;
         self.got_end = true;
 
-        let total_expected = self.expected_modify + self.expected_delete + self.expected_upload;
+        let total_expected = self.expected_modify
+            + self.expected_delete
+            + self.expected_upload
+            + self.expected_mtime;
         if total_expected == 0 {
             self.sync_complete = true;
         } else {
@@ -530,7 +562,22 @@ impl SettingSync {
 
     /// Return the total number of settings successfully synced (modify + delete)
     pub fn synced_count(&self) -> usize {
-        self.received_modify + self.received_delete
+        self.received_modify + self.received_delete + self.received_upload + self.received_mtime
+    }
+
+    pub fn handle_setting_modify_ack(&mut self, msg: &serde_json::Value) {
+        let data = extract_inner(msg);
+        let rel_path = data
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if !rel_path.is_empty() && self.pending_uploads.remove(rel_path) {
+            self.received_upload += 1;
+            self.check_all_received();
+        }
+
+        debug!(path = rel_path, "Received SettingModifyAck");
     }
 
     /// Check if a file is text (not binary)
@@ -660,9 +707,12 @@ impl SettingSync {
         self.expected_modify = 0;
         self.expected_delete = 0;
         self.expected_upload = 0;
+        self.expected_mtime = 0;
         self.received_modify = 0;
         self.received_delete = 0;
         self.received_upload = 0;
+        self.received_mtime = 0;
+        self.pending_uploads.clear();
         self.pending_last_time = 0;
     }
 
@@ -672,14 +722,21 @@ impl SettingSync {
             return;
         }
 
-        let total_expected = self.expected_modify + self.expected_delete + self.expected_upload;
-        let total_received = self.received_modify + self.received_delete + self.received_upload;
+        let total_expected = self.expected_modify
+            + self.expected_delete
+            + self.expected_upload
+            + self.expected_mtime;
+        let total_received = self.received_modify
+            + self.received_delete
+            + self.received_upload
+            + self.received_mtime;
 
         if total_received >= total_expected {
             info!(
                 modify = self.received_modify,
                 delete = self.received_delete,
                 upload = self.received_upload,
+                mtime = self.received_mtime,
                 "SettingSync complete"
             );
             self.sync_complete = true;

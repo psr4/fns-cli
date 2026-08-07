@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -50,12 +50,18 @@ pub struct NoteSync {
     expected_delete: usize,
     /// Expected upload count from NoteSyncEnd.
     expected_upload: usize,
+    /// Expected mtime-only update count from NoteSyncEnd.
+    expected_mtime: usize,
     /// Received modify count.
     received_modify: usize,
     /// Received delete count.
     received_delete: usize,
     /// Received upload count.
     received_upload: usize,
+    /// Received mtime-only update count.
+    received_mtime: usize,
+    /// NeedPush uploads awaiting NoteModifyAck.
+    pending_uploads: HashSet<String>,
     /// Got NoteSyncEnd message.
     got_end: bool,
     /// Pending last sync time to commit.
@@ -111,9 +117,12 @@ impl NoteSync {
             expected_modify: 0,
             expected_delete: 0,
             expected_upload: 0,
+            expected_mtime: 0,
             received_modify: 0,
             received_delete: 0,
             received_upload: 0,
+            received_mtime: 0,
+            pending_uploads: HashSet::new(),
             got_end: false,
             pending_last_time: 0,
         }
@@ -126,7 +135,7 @@ impl NoteSync {
 
     /// Return the total number of notes successfully synced (modify + delete + upload).
     pub fn synced_count(&self) -> usize {
-        self.received_modify + self.received_delete + self.received_upload
+        self.received_modify + self.received_delete + self.received_upload + self.received_mtime
     }
 
     /// Send incremental NoteSync request.
@@ -234,6 +243,8 @@ impl NoteSync {
                         }
                         Action::Server(ServerAction::NoteSyncMtime) => {
                             self.handle_note_mtime(&data)?;
+                            self.received_mtime += 1;
+                            self.check_all_received();
                         }
                         Action::Server(ServerAction::NoteSyncNeedPush) => {
                             self.handle_note_need_push(&data, ws).await?;
@@ -245,7 +256,7 @@ impl NoteSync {
                             }
                         }
                         Action::Server(ServerAction::NoteModifyAck) => {
-                            debug!("Received NoteModifyAck");
+                            self.handle_note_modify_ack(&data);
                         }
                         _ => {
                             debug!(action = ?action, "Ignoring unexpected action during note sync");
@@ -475,9 +486,13 @@ impl NoteSync {
         }
 
         info!(path = %rel_path, "<- NoteSyncNeedPush");
-        self.push_modify(ws, &rel_path, true).await?;
-        self.received_upload += 1;
-        self.check_all_received();
+        if self.vault_path.join(&rel_path).exists() {
+            self.pending_uploads.insert(rel_path.clone());
+            self.push_modify(ws, &rel_path, true).await?;
+        } else {
+            self.received_upload += 1;
+            self.check_all_received();
+        }
         Ok(())
     }
 
@@ -502,11 +517,17 @@ impl NoteSync {
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
+        let need_sync_mtime_count: i64 = data
+            .get("needSyncMtimeCount")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
         info!(
             last_time = last_time,
             need_modify = need_modify_count,
             need_delete = need_delete_count,
             need_upload = need_upload_count,
+            need_sync_mtime = need_sync_mtime_count,
             "<- NoteSyncEnd"
         );
 
@@ -514,9 +535,13 @@ impl NoteSync {
         self.expected_modify = need_modify_count as usize;
         self.expected_delete = need_delete_count as usize;
         self.expected_upload = need_upload_count as usize;
+        self.expected_mtime = need_sync_mtime_count as usize;
         self.got_end = true;
 
-        let total_expected = self.expected_modify + self.expected_delete + self.expected_upload;
+        let total_expected = self.expected_modify
+            + self.expected_delete
+            + self.expected_upload
+            + self.expected_mtime;
         if total_expected == 0 {
             self.sync_complete = true;
         } else {
@@ -524,6 +549,21 @@ impl NoteSync {
         }
 
         Ok(())
+    }
+
+    fn handle_note_modify_ack(&mut self, msg_data: &serde_json::Value) {
+        let data = extract_inner(msg_data);
+        let rel_path = data
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if !rel_path.is_empty() && self.pending_uploads.remove(rel_path) {
+            self.received_upload += 1;
+            self.check_all_received();
+        }
+
+        debug!(path = rel_path, "Received NoteModifyAck");
     }
 
     /// Get the pending last sync time.
@@ -650,9 +690,12 @@ impl NoteSync {
         self.expected_modify = 0;
         self.expected_delete = 0;
         self.expected_upload = 0;
+        self.expected_mtime = 0;
         self.received_modify = 0;
         self.received_delete = 0;
         self.received_upload = 0;
+        self.received_mtime = 0;
+        self.pending_uploads.clear();
         self.pending_last_time = 0;
     }
 
@@ -662,14 +705,21 @@ impl NoteSync {
             return;
         }
 
-        let total_expected = self.expected_modify + self.expected_delete + self.expected_upload;
-        let total_received = self.received_modify + self.received_delete + self.received_upload;
+        let total_expected = self.expected_modify
+            + self.expected_delete
+            + self.expected_upload
+            + self.expected_mtime;
+        let total_received = self.received_modify
+            + self.received_delete
+            + self.received_upload
+            + self.received_mtime;
 
         if total_received >= total_expected {
             info!(
                 modify = self.received_modify,
                 delete = self.received_delete,
                 upload = self.received_upload,
+                mtime = self.received_mtime,
                 "NoteSync complete"
             );
             self.sync_complete = true;
@@ -781,10 +831,18 @@ impl NoteSync {
                 .unwrap_or_default()
                 .as_millis() as i64;
 
+            let ctime = metadata
+                .created()
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+
             notes.push(NoteSyncCheck {
                 path_hash: hash_path(&rel),
                 path: rel,
                 content_hash,
+                ctime,
                 mtime,
             });
         }
