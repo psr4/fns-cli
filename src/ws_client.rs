@@ -122,7 +122,7 @@ impl WsClient {
         };
 
         format!(
-            "{}/api/user/sync?lang=zh-cn&count={}",
+            "{}/api/user/sync?lang=zh-cn&client=ObsidianPlugin&clientName=fns-cli&clientVersion=0.1.0&count={}",
             ws_api.trim_end_matches('/'),
             self.connect_count
         )
@@ -154,11 +154,10 @@ impl WsClient {
     /// Sends `Authorization|"token"` and waits for response.
     /// Success codes: 1 or 200.
     pub async fn authenticate(&mut self, ws: &mut WsStream) -> Result<(), FnsError> {
+        let token = normalize_auth_token(&self.config.token);
+
         // Send authorization message
-        let auth_msg = encode_simple_message(
-            &Action::Client(ClientAction::Authorization),
-            &self.config.token,
-        );
+        let auth_msg = encode_simple_message(&Action::Client(ClientAction::Authorization), &token);
 
         debug!("Sending authorization");
         ws.send(Message::Text(auth_msg.into()))
@@ -397,6 +396,21 @@ impl WsClient {
     }
 }
 
+fn normalize_auth_token(token: &str) -> String {
+    let trimmed = token.trim();
+    let without_bearer = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .unwrap_or(trimmed)
+        .trim();
+
+    without_bearer
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(without_bearer)
+        .to_string()
+}
+
 /// Connection state for tracking WebSocket status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -454,7 +468,7 @@ mod tests {
         let url = client.build_url();
         assert_eq!(
             url,
-            "wss://server.example.com/api/user/sync?lang=zh-cn&count=1"
+            "wss://server.example.com/api/user/sync?lang=zh-cn&client=ObsidianPlugin&clientName=fns-cli&clientVersion=0.1.0&count=1"
         );
     }
 
@@ -466,7 +480,10 @@ mod tests {
         client.connect_count = 5;
 
         let url = client.build_url();
-        assert_eq!(url, "ws://localhost:8080/api/user/sync?lang=zh-cn&count=5");
+        assert_eq!(
+            url,
+            "ws://localhost:8080/api/user/sync?lang=zh-cn&client=ObsidianPlugin&clientName=fns-cli&clientVersion=0.1.0&count=5"
+        );
     }
 
     #[test]
@@ -479,7 +496,21 @@ mod tests {
         let url = client.build_url();
         assert_eq!(
             url,
-            "wss://server.example.com/api/user/sync?lang=zh-cn&count=1"
+            "wss://server.example.com/api/user/sync?lang=zh-cn&client=ObsidianPlugin&clientName=fns-cli&clientVersion=0.1.0&count=1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_auth_token() {
+        assert_eq!(normalize_auth_token("abc.def.ghi"), "abc.def.ghi");
+        assert_eq!(
+            normalize_auth_token(" Bearer abc.def.ghi \n"),
+            "abc.def.ghi"
+        );
+        assert_eq!(normalize_auth_token("\"abc.def.ghi\""), "abc.def.ghi");
+        assert_eq!(
+            normalize_auth_token("Bearer \"abc.def.ghi\""),
+            "abc.def.ghi"
         );
     }
 

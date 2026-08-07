@@ -691,6 +691,10 @@ impl SettingSync {
         if rel == ".fns_state.json" {
             return true;
         }
+        // Exclude plugin temp chunk files generated during uploads
+        if rel.contains("/temp-chunks/") || rel.contains("/temp-chunks") {
+            return true;
+        }
         let excluded_prefixes = [".git/", ".trash/"];
         for prefix in &excluded_prefixes {
             if rel.starts_with(prefix) {
@@ -896,6 +900,7 @@ mod tests {
 
         assert!(sync.is_excluded(".git/config"));
         assert!(sync.is_excluded(".trash/old.md"));
+        assert!(sync.is_excluded(".obsidian/plugins/fast-note-sync/temp-chunks/uuid/0.bin"));
         assert!(!sync.is_excluded(".obsidian/app.json"));
         assert!(!sync.is_excluded("notes/hello.md"));
     }
