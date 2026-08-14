@@ -412,6 +412,9 @@ impl SyncCoordinator {
                 Message::Binary(data) => {
                     let mut file_sync = self.file_sync.lock().await;
                     file_sync.handle_binary_chunk(&data)?;
+                    if file_sync.is_complete() {
+                        return Ok(());
+                    }
                 }
                 Message::Close(_) => {
                     return Err(FnsError::WebSocket {
@@ -501,26 +504,44 @@ impl SyncCoordinator {
         match action {
             ServerAction::SettingSyncModify => {
                 self.setting_sync.handle_setting_modify(&data)?;
+                self.setting_sync.mark_page_message();
+                self.setting_sync.finish_page_if_needed(ws).await?;
             }
             ServerAction::SettingSyncDelete => {
                 self.setting_sync.handle_setting_delete(&data)?;
+                self.setting_sync.mark_page_message();
+                self.setting_sync.finish_page_if_needed(ws).await?;
             }
             ServerAction::SettingSyncRename => {
                 self.setting_sync.handle_setting_rename(&data)?;
+                self.setting_sync.mark_page_message();
+                self.setting_sync.finish_page_if_needed(ws).await?;
             }
             ServerAction::SettingSyncMtime => {
                 self.setting_sync.handle_setting_mtime(&data)?;
+                self.setting_sync.mark_page_message();
+                self.setting_sync.finish_page_if_needed(ws).await?;
             }
             ServerAction::SettingSyncNeedUpload => {
                 self.setting_sync
                     .handle_setting_need_upload(ws, &data)
                     .await?;
+                self.setting_sync.mark_page_message();
+                self.setting_sync.finish_page_if_needed(ws).await?;
+            }
+            ServerAction::SettingSyncPage => {
+                self.setting_sync.handle_setting_page(&data)?;
+                self.setting_sync.finish_page_if_needed(ws).await?;
             }
             ServerAction::SettingSyncEnd => {
                 self.setting_sync.handle_setting_end(&data)?;
+                if !self.setting_sync.is_sync_complete() {
+                    self.setting_sync.send_page_ack(ws, -1).await?;
+                }
             }
             ServerAction::SettingModifyAck => {
                 self.setting_sync.handle_setting_modify_ack(&data);
+                self.setting_sync.finish_page_if_needed(ws).await?;
             }
             _ => {
                 if matches!(

@@ -4,7 +4,7 @@
 //! 1. Connect to `ws://host:9000/api/user/sync?lang=zh-cn&count=N`
 //! 2. Send `Authorization|"token"`
 //! 3. Receive auth response (code 1 or 200 = success)
-//! 4. Send `ClientInfo|{"name":"fns-cli","type":"cli","version":"0.1.0"}`
+//! 4. Send `ClientInfo|{"name":"fns-cli","type":"ObsidianPlugin","version":"0.1.0"}`
 //! 5. Ready for sync operations
 
 #![allow(dead_code)]
@@ -227,11 +227,11 @@ impl WsClient {
 
     /// Send client info to the server.
     ///
-    /// Sends `ClientInfo|{"name":"fns-cli","type":"cli","version":"0.1.0"}`.
+    /// Sends `ClientInfo|{"name":"fns-cli","type":"ObsidianPlugin","version":"0.1.0"}`.
     pub async fn send_client_info(&mut self, ws: &mut WsStream) -> Result<(), FnsError> {
         let client_info = serde_json::json!({
             "name": "fns-cli",
-            "type": "cli",
+            "type": "ObsidianPlugin",
             "version": "0.1.0"
         });
 

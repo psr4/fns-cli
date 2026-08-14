@@ -23,7 +23,8 @@ use crate::error::FnsError;
 use crate::hash::{hash_bytes, hash_path};
 use crate::protocol::{
     BinaryChunkParser, ChunkReassembler, ClientAction, FileDeleteRequest, FileSyncCheck,
-    FileSyncRequest, FileUploadCheckRequest, SEPARATOR, ServerAction, build_binary_chunk,
+    FileSyncRequest, FileUploadCheckRequest, SEPARATOR, ServerAction, SyncPageAckRequest,
+    SyncPageMessage, build_binary_chunk,
 };
 use crate::state::SyncState;
 use crate::ws_client::WsStream;
@@ -96,6 +97,14 @@ pub struct FileSync {
     got_end: bool,
     /// Pending last_time from server
     pending_last_time: i64,
+    sync_context: Option<String>,
+    page_active: bool,
+    page_index: i32,
+    page_total: usize,
+    page_received: usize,
+    page_is_last: bool,
+    paging_started: bool,
+    page_last_seen: bool,
 }
 
 impl FileSync {
@@ -118,6 +127,14 @@ impl FileSync {
             received_upload: 0,
             got_end: false,
             pending_last_time: 0,
+            sync_context: None,
+            page_active: false,
+            page_index: 0,
+            page_total: 0,
+            page_received: 0,
+            page_is_last: false,
+            paging_started: false,
+            page_last_seen: false,
         }
     }
 
@@ -153,6 +170,14 @@ impl FileSync {
             received_upload: 0,
             got_end: false,
             pending_last_time: 0,
+            sync_context: None,
+            page_active: false,
+            page_index: 0,
+            page_total: 0,
+            page_received: 0,
+            page_is_last: false,
+            paging_started: false,
+            page_last_seen: false,
         }
     }
 
@@ -168,6 +193,14 @@ impl FileSync {
         self.received_upload = 0;
         self.got_end = false;
         self.pending_last_time = 0;
+        self.sync_context = None;
+        self.page_active = false;
+        self.page_index = 0;
+        self.page_total = 0;
+        self.page_received = 0;
+        self.page_is_last = false;
+        self.paging_started = false;
+        self.page_last_seen = false;
         self.last_activity = Instant::now();
     }
 
@@ -199,9 +232,80 @@ impl FileSync {
         }
         let total_expected = self.expected_modify + self.expected_delete + self.expected_upload;
         let total_received = self.received_modify + self.received_delete + self.received_upload;
+        if total_expected > 0 && self.paging_started && !self.page_last_seen {
+            return false;
+        }
         total_received >= total_expected
             && self.active_downloads.is_empty()
             && self.active_uploads.is_empty()
+    }
+
+    fn mark_page_message(&mut self) {
+        if self.page_active {
+            self.page_received += 1;
+        }
+    }
+
+    fn handle_sync_page(&mut self, data: serde_json::Value) -> Result<(), FnsError> {
+        self.mark_activity();
+        let page: SyncPageMessage = serde_json::from_value(extract_inner(&data).clone())?;
+
+        self.page_active = true;
+        self.page_index = page.page_index;
+        self.page_total = page.total_count.max(0) as usize;
+        self.page_received = 0;
+        self.page_is_last = page.is_last;
+
+        debug!(
+            page_index = self.page_index,
+            page_size = page.page_size,
+            total_count = self.page_total,
+            is_last = self.page_is_last,
+            "<- FileSyncPage"
+        );
+
+        Ok(())
+    }
+
+    async fn finish_page_if_needed(&mut self, ws: &mut WsStream) -> Result<(), FnsError> {
+        if !self.page_active || self.page_received < self.page_total {
+            return Ok(());
+        }
+
+        let page_index = self.page_index;
+        let is_last = self.page_is_last;
+        self.page_active = false;
+        self.page_total = 0;
+        self.page_received = 0;
+
+        if is_last {
+            self.page_last_seen = true;
+        } else {
+            self.send_page_ack(ws, page_index).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn send_page_ack(&self, ws: &mut WsStream, page_index: i32) -> Result<(), FnsError> {
+        let request = SyncPageAckRequest {
+            context: self.sync_context.clone(),
+            vault: self.vault_name.clone(),
+            page_index,
+        };
+        let msg = format!(
+            "{}{}{}",
+            ClientAction::FileSyncPageAck,
+            SEPARATOR,
+            serde_json::to_string(&request)?
+        );
+
+        debug!(page_index, "-> FileSyncPageAck");
+        ws.send(Message::Text(msg.into()))
+            .await
+            .map_err(|e| FnsError::WebSocket {
+                message: format!("Failed to send FileSyncPageAck: {}", e),
+            })
     }
 
     /// Request file sync from server
@@ -215,6 +319,7 @@ impl FileSync {
         let files = self.collect_local_files()?;
         let file_count = files.len();
         let context = uuid::Uuid::new_v4().to_string();
+        self.sync_context = Some(context.clone());
 
         let request = FileSyncRequest {
             vault: self.vault_name.clone(),
@@ -276,6 +381,10 @@ impl FileSync {
                 continue;
             }
 
+            if is_excluded_file_path(&rel) {
+                continue;
+            }
+
             // Skip dot-prefixed directories (handled by SettingSync)
             if rel
                 .split('/')
@@ -310,6 +419,11 @@ impl FileSync {
 
     /// Push upload a file to server
     pub async fn push_upload(&mut self, ws: &mut WsStream, rel_path: &str) -> Result<(), FnsError> {
+        if is_dot_prefixed_path(rel_path) || is_excluded_file_path(rel_path) {
+            debug!(path = rel_path, "FileUploadCheck ignored for excluded path");
+            return Ok(());
+        }
+
         let full_path = self.vault_path.join(rel_path);
         if !full_path.exists() {
             return Ok(());
@@ -352,6 +466,11 @@ impl FileSync {
 
     /// Push delete a file from server
     pub async fn push_delete(&mut self, ws: &mut WsStream, rel_path: &str) -> Result<(), FnsError> {
+        if is_dot_prefixed_path(rel_path) || is_excluded_file_path(rel_path) {
+            debug!(path = rel_path, "FileDelete ignored for excluded path");
+            return Ok(());
+        }
+
         self.echo_hashes.remove(rel_path);
 
         let request = FileDeleteRequest {
@@ -390,27 +509,45 @@ impl FileSync {
         match action {
             ServerAction::FileSyncUpdate => {
                 self.handle_sync_update(ws, data).await?;
+                self.mark_page_message();
+                self.finish_page_if_needed(ws).await?;
             }
             ServerAction::FileSyncDelete => {
                 self.handle_sync_delete(data)?;
+                self.mark_page_message();
+                self.finish_page_if_needed(ws).await?;
             }
             ServerAction::FileSyncRename => {
                 self.handle_sync_rename(data)?;
+                self.mark_page_message();
+                self.finish_page_if_needed(ws).await?;
             }
             ServerAction::FileSyncMtime => {
                 self.handle_sync_mtime(data)?;
+                self.mark_page_message();
+                self.finish_page_if_needed(ws).await?;
+            }
+            ServerAction::FileSyncPage => {
+                self.handle_sync_page(data)?;
+                self.finish_page_if_needed(ws).await?;
             }
             ServerAction::FileSyncChunkDownload => {
                 self.handle_chunk_download_start(data)?;
             }
             ServerAction::FileUpload => {
                 self.handle_upload_session(ws, data).await?;
+                self.mark_page_message();
+                self.finish_page_if_needed(ws).await?;
             }
             ServerAction::FileUploadAck => {
                 self.handle_upload_ack(data)?;
             }
             ServerAction::FileSyncEnd => {
                 self.handle_sync_end(data)?;
+                if !self.is_complete() {
+                    self.paging_started = true;
+                    self.send_page_ack(ws, -1).await?;
+                }
             }
             _ => {}
         }
@@ -436,8 +573,8 @@ impl FileSync {
             return Ok(());
         }
 
-        if is_dot_prefixed_path(&rel_path) {
-            debug!(path = rel_path, "FileSyncUpdate ignored for config path");
+        if is_dot_prefixed_path(&rel_path) || is_excluded_file_path(&rel_path) {
+            debug!(path = rel_path, "FileSyncUpdate ignored for excluded path");
             self.received_modify += 1;
             return Ok(());
         }
@@ -504,8 +641,8 @@ impl FileSync {
             return Ok(());
         }
 
-        if is_dot_prefixed_path(&rel_path) {
-            debug!(path = rel_path, "FileSyncDelete ignored for config path");
+        if is_dot_prefixed_path(&rel_path) || is_excluded_file_path(&rel_path) {
+            debug!(path = rel_path, "FileSyncDelete ignored for excluded path");
             self.received_delete += 1;
             return Ok(());
         }
@@ -590,6 +727,11 @@ impl FileSync {
             return Ok(());
         }
 
+        if is_dot_prefixed_path(&rel_path) || is_excluded_file_path(&rel_path) {
+            debug!(path = rel_path, "FileSyncMtime ignored for excluded path");
+            return Ok(());
+        }
+
         let full_path = self.vault_path.join(&rel_path);
         if full_path.exists() {
             set_file_mtime(&full_path, mtime)?;
@@ -630,6 +772,15 @@ impl FileSync {
             .unwrap_or(self.chunk_size);
 
         if session_id.is_empty() || rel_path.is_empty() {
+            return Ok(());
+        }
+
+        if is_dot_prefixed_path(&rel_path) || is_excluded_file_path(&rel_path) {
+            debug!(
+                path = rel_path,
+                "FileSyncChunkDownload ignored for excluded path"
+            );
+            self.received_modify += 1;
             return Ok(());
         }
 
@@ -700,6 +851,12 @@ impl FileSync {
             .unwrap_or_default();
 
         if session_id.is_empty() || rel_path.is_empty() {
+            return Ok(());
+        }
+
+        if is_dot_prefixed_path(&rel_path) || is_excluded_file_path(&rel_path) {
+            debug!(path = rel_path, "FileUpload ignored for excluded path");
+            self.received_upload += 1;
             return Ok(());
         }
 
@@ -964,11 +1121,87 @@ impl FileSync {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_excluded_file_paths() {
+        assert!(is_excluded_file_path(".fns_state.json"));
+        assert!(is_excluded_file_path(".DS_Store"));
+        assert!(is_excluded_file_path("folder/.DS_Store"));
+        assert!(is_excluded_file_path(".index/chunks.json"));
+        assert!(is_excluded_file_path(".index/cache.bin"));
+        assert!(is_excluded_file_path(
+            ".obsidian/plugins/fast-note-sync/temp-chunks/session/9.bin"
+        ));
+        assert!(is_excluded_file_path("notes/temp-chunks/session/9.bin"));
+        assert!(is_excluded_file_path("draft.tmp"));
+        assert!(is_excluded_file_path(".tmp123"));
+        assert!(is_excluded_file_path("draft.tmp.download"));
+
+        assert!(!is_excluded_file_path("attachments/image.png"));
+        assert!(is_dot_prefixed_path(
+            ".fns_state.json.bak-note-reset-20260814165128"
+        ));
+        assert!(!is_excluded_file_path("notes/temp-chunks-final.md"));
+    }
+
+    #[test]
+    fn test_collect_local_files_excludes_cache_and_temp_files() {
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().to_path_buf();
+
+        fs::create_dir_all(vault_path.join("attachments")).unwrap();
+        fs::write(vault_path.join("attachments/image.png"), [1, 2, 3]).unwrap();
+        fs::write(vault_path.join("attachments/.DS_Store"), [4, 5]).unwrap();
+        fs::write(vault_path.join("note.md"), "# note").unwrap();
+        fs::write(vault_path.join("draft.tmp"), "tmp").unwrap();
+
+        fs::create_dir_all(vault_path.join(".index")).unwrap();
+        fs::write(vault_path.join(".index/chunks.json"), "{}").unwrap();
+
+        let chunk_dir = vault_path.join(".obsidian/plugins/fast-note-sync/temp-chunks/session");
+        fs::create_dir_all(&chunk_dir).unwrap();
+        fs::write(chunk_dir.join("9.bin"), [9]).unwrap();
+
+        let sync = FileSync::with_params(vault_path, "test".to_string(), 0, 0);
+        let files = sync.collect_local_files().unwrap();
+        let paths: Vec<_> = files.into_iter().map(|f| f.path).collect();
+
+        assert_eq!(paths, vec!["attachments/image.png"]);
+    }
+}
+
 fn is_dot_prefixed_path(path: &str) -> bool {
     path.split('/')
         .next()
         .map(|s| s.starts_with('.'))
         .unwrap_or(false)
+}
+
+fn is_excluded_file_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+
+    if path == ".fns_state.json" || name == ".DS_Store" {
+        return true;
+    }
+
+    if path == ".index/chunks.json" || path.starts_with(".index/") {
+        return true;
+    }
+
+    if path.split('/').any(|segment| segment == "temp-chunks") {
+        return true;
+    }
+
+    if name.starts_with(".tmp") || name.ends_with(".tmp") || name.contains(".tmp.") {
+        return true;
+    }
+
+    name.ends_with(".swp") || name.contains(".~#")
 }
 
 /// Extract inner data from server response

@@ -18,7 +18,7 @@ use crate::error::FnsError;
 use crate::hash::{hash_content, hash_path};
 use crate::protocol::{
     Action, ClientAction, NoteDeleteRequest, NoteModifyRequest, NoteSyncCheck, NoteSyncRequest,
-    ServerAction, decode_message, encode_message,
+    ServerAction, SyncPageAckRequest, SyncPageMessage, decode_message, encode_message,
 };
 use crate::state::SyncState;
 use crate::ws_client::WsStream;
@@ -66,6 +66,15 @@ pub struct NoteSync {
     got_end: bool,
     /// Pending last sync time to commit.
     pending_last_time: i64,
+    /// Context for the current NoteSync request, used by 3.6.0 page pulls.
+    sync_context: Option<String>,
+    page_active: bool,
+    page_index: i32,
+    page_total: usize,
+    page_received: usize,
+    page_is_last: bool,
+    paging_started: bool,
+    page_last_seen: bool,
 }
 
 async fn read_stable_note_content(path: &Path) -> Result<String, std::io::Error> {
@@ -125,6 +134,14 @@ impl NoteSync {
             pending_uploads: HashSet::new(),
             got_end: false,
             pending_last_time: 0,
+            sync_context: None,
+            page_active: false,
+            page_index: 0,
+            page_total: 0,
+            page_received: 0,
+            page_is_last: false,
+            paging_started: false,
+            page_last_seen: false,
         }
     }
 
@@ -152,6 +169,7 @@ impl NoteSync {
 
         let notes = self.collect_local_notes_filtered(last_sync_time)?;
         let context = uuid::Uuid::new_v4().to_string();
+        self.sync_context = Some(context.clone());
 
         let request = NoteSyncRequest {
             vault: self.vault.clone(),
@@ -187,6 +205,7 @@ impl NoteSync {
 
         let notes = self.collect_local_notes_all()?;
         let context = uuid::Uuid::new_v4().to_string();
+        self.sync_context = Some(context.clone());
 
         let request = NoteSyncRequest {
             vault: self.vault.clone(),
@@ -231,32 +250,49 @@ impl NoteSync {
                         Action::Server(ServerAction::NoteSyncModify) => {
                             self.handle_note_modify(&data)?;
                             self.received_modify += 1;
+                            self.mark_page_message();
                             self.check_all_received();
+                            self.finish_page_if_needed(ws).await?;
                         }
                         Action::Server(ServerAction::NoteSyncDelete) => {
                             self.handle_note_delete(&data)?;
                             self.received_delete += 1;
+                            self.mark_page_message();
                             self.check_all_received();
+                            self.finish_page_if_needed(ws).await?;
                         }
                         Action::Server(ServerAction::NoteSyncRename) => {
                             self.handle_note_rename(&data)?;
+                            self.mark_page_message();
+                            self.finish_page_if_needed(ws).await?;
+                        }
+                        Action::Server(ServerAction::NoteSyncPage) => {
+                            self.handle_sync_page(&data)?;
+                            self.finish_page_if_needed(ws).await?;
                         }
                         Action::Server(ServerAction::NoteSyncMtime) => {
                             self.handle_note_mtime(&data)?;
                             self.received_mtime += 1;
+                            self.mark_page_message();
                             self.check_all_received();
+                            self.finish_page_if_needed(ws).await?;
                         }
                         Action::Server(ServerAction::NoteSyncNeedPush) => {
                             self.handle_note_need_push(&data, ws).await?;
+                            self.mark_page_message();
+                            self.finish_page_if_needed(ws).await?;
                         }
                         Action::Server(ServerAction::NoteSyncEnd) => {
                             self.handle_sync_end(&data)?;
                             if self.sync_complete {
                                 return Ok(());
                             }
+                            self.paging_started = true;
+                            self.send_page_ack(ws, -1).await?;
                         }
                         Action::Server(ServerAction::NoteModifyAck) => {
                             self.handle_note_modify_ack(&data);
+                            self.finish_page_if_needed(ws).await?;
                         }
                         _ => {
                             debug!(action = ?action, "Ignoring unexpected action during note sync");
@@ -351,6 +387,69 @@ impl NoteSync {
 
         info!(path = %rel_path, "<- NoteSyncModify applied");
         Ok(())
+    }
+
+    fn handle_sync_page(&mut self, msg_data: &serde_json::Value) -> Result<(), FnsError> {
+        let page: SyncPageMessage = serde_json::from_value(extract_inner(msg_data).clone())?;
+
+        self.page_active = true;
+        self.page_index = page.page_index;
+        self.page_total = page.total_count.max(0) as usize;
+        self.page_received = 0;
+        self.page_is_last = page.is_last;
+
+        debug!(
+            page_index = self.page_index,
+            page_size = page.page_size,
+            total_count = self.page_total,
+            is_last = self.page_is_last,
+            "<- NoteSyncPage"
+        );
+
+        Ok(())
+    }
+
+    fn mark_page_message(&mut self) {
+        if self.page_active {
+            self.page_received += 1;
+        }
+    }
+
+    async fn finish_page_if_needed(&mut self, ws: &mut WsStream) -> Result<(), FnsError> {
+        if !self.page_active || self.page_received < self.page_total {
+            return Ok(());
+        }
+
+        let page_index = self.page_index;
+        let is_last = self.page_is_last;
+        self.page_active = false;
+        self.page_total = 0;
+        self.page_received = 0;
+
+        if is_last {
+            self.page_last_seen = true;
+            self.check_all_received();
+        } else {
+            self.send_page_ack(ws, page_index).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn send_page_ack(&self, ws: &mut WsStream, page_index: i32) -> Result<(), FnsError> {
+        let request = SyncPageAckRequest {
+            context: self.sync_context.clone(),
+            vault: self.vault.clone(),
+            page_index,
+        };
+        let msg = encode_message(&Action::Client(ClientAction::NoteSyncPageAck), &request)?;
+
+        debug!(page_index, "-> NoteSyncPageAck");
+        ws.send(Message::Text(msg.into()))
+            .await
+            .map_err(|e| FnsError::WebSocket {
+                message: format!("Failed to send NoteSyncPageAck: {}", e),
+            })
     }
 
     /// Handle a NoteSyncDelete message from the server.
@@ -697,6 +796,14 @@ impl NoteSync {
         self.received_mtime = 0;
         self.pending_uploads.clear();
         self.pending_last_time = 0;
+        self.sync_context = None;
+        self.page_active = false;
+        self.page_index = 0;
+        self.page_total = 0;
+        self.page_received = 0;
+        self.page_is_last = false;
+        self.paging_started = false;
+        self.page_last_seen = false;
     }
 
     /// Check if all expected server messages have been received.
@@ -715,6 +822,9 @@ impl NoteSync {
             + self.received_mtime;
 
         if total_received >= total_expected {
+            if total_expected > 0 && self.paging_started && !self.page_last_seen {
+                return;
+            }
             info!(
                 modify = self.received_modify,
                 delete = self.received_delete,

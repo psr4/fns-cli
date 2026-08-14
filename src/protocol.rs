@@ -37,17 +37,21 @@ pub enum ClientAction {
     NoteRename,
     NoteCheck,
     NoteRePush,
+    NoteSyncPageAck,
     FileSync,
     FileUploadCheck,
     FileDelete,
     FileChunkDownload,
+    FileSyncPageAck,
     FolderSync,
     FolderModify,
     FolderDelete,
     FolderRename,
+    FolderSyncPageAck,
     SettingSync,
     SettingModify,
     SettingDelete,
+    SettingSyncPageAck,
 }
 
 // ── Server → Client actions ─────────────────────────────────────────────
@@ -65,6 +69,7 @@ pub enum ServerAction {
     NoteModifyAck,
     NoteDeleteAck,
     NoteSyncAck,
+    NoteSyncPage,
     FileSyncUpdate,
     FileSyncDelete,
     FileSyncRename,
@@ -74,6 +79,7 @@ pub enum ServerAction {
     FileUploadAck,
     FileDeleteAck,
     FileSyncAck,
+    FileSyncPage,
     FileSyncEnd,
     SettingSyncModify,
     SettingSyncDelete,
@@ -81,6 +87,7 @@ pub enum ServerAction {
     SettingSyncMtime,
     SettingSyncNeedUpload,
     SettingSyncAck,
+    SettingSyncPage,
     SettingSyncEnd,
     SettingModifyAck,
     FolderSyncModify,
@@ -109,17 +116,21 @@ impl fmt::Display for ClientAction {
             ClientAction::NoteRename => write!(f, "NoteRename"),
             ClientAction::NoteCheck => write!(f, "NoteCheck"),
             ClientAction::NoteRePush => write!(f, "NoteRePush"),
+            ClientAction::NoteSyncPageAck => write!(f, "NoteSyncPageAck"),
             ClientAction::FileSync => write!(f, "FileSync"),
             ClientAction::FileUploadCheck => write!(f, "FileUploadCheck"),
             ClientAction::FileDelete => write!(f, "FileDelete"),
             ClientAction::FileChunkDownload => write!(f, "FileChunkDownload"),
+            ClientAction::FileSyncPageAck => write!(f, "FileSyncPageAck"),
             ClientAction::FolderSync => write!(f, "FolderSync"),
             ClientAction::FolderModify => write!(f, "FolderModify"),
             ClientAction::FolderDelete => write!(f, "FolderDelete"),
             ClientAction::FolderRename => write!(f, "FolderRename"),
+            ClientAction::FolderSyncPageAck => write!(f, "FolderSyncPageAck"),
             ClientAction::SettingSync => write!(f, "SettingSync"),
             ClientAction::SettingModify => write!(f, "SettingModify"),
             ClientAction::SettingDelete => write!(f, "SettingDelete"),
+            ClientAction::SettingSyncPageAck => write!(f, "SettingSyncPageAck"),
         }
     }
 }
@@ -136,6 +147,7 @@ impl fmt::Display for ServerAction {
             ServerAction::NoteModifyAck => write!(f, "NoteModifyAck"),
             ServerAction::NoteDeleteAck => write!(f, "NoteDeleteAck"),
             ServerAction::NoteSyncAck => write!(f, "NoteSyncAck"),
+            ServerAction::NoteSyncPage => write!(f, "NoteSyncPage"),
             ServerAction::FileSyncUpdate => write!(f, "FileSyncUpdate"),
             ServerAction::FileSyncDelete => write!(f, "FileSyncDelete"),
             ServerAction::FileSyncRename => write!(f, "FileSyncRename"),
@@ -145,6 +157,7 @@ impl fmt::Display for ServerAction {
             ServerAction::FileUploadAck => write!(f, "FileUploadAck"),
             ServerAction::FileDeleteAck => write!(f, "FileDeleteAck"),
             ServerAction::FileSyncAck => write!(f, "FileSyncAck"),
+            ServerAction::FileSyncPage => write!(f, "FileSyncPage"),
             ServerAction::FileSyncEnd => write!(f, "FileSyncEnd"),
             ServerAction::SettingSyncModify => write!(f, "SettingSyncModify"),
             ServerAction::SettingSyncDelete => write!(f, "SettingSyncDelete"),
@@ -152,6 +165,7 @@ impl fmt::Display for ServerAction {
             ServerAction::SettingSyncMtime => write!(f, "SettingSyncMtime"),
             ServerAction::SettingSyncNeedUpload => write!(f, "SettingSyncNeedUpload"),
             ServerAction::SettingSyncAck => write!(f, "SettingSyncAck"),
+            ServerAction::SettingSyncPage => write!(f, "SettingSyncPage"),
             ServerAction::SettingSyncEnd => write!(f, "SettingSyncEnd"),
             ServerAction::SettingModifyAck => write!(f, "SettingModifyAck"),
             ServerAction::FolderSyncModify => write!(f, "FolderSyncModify"),
@@ -184,17 +198,21 @@ impl std::str::FromStr for Action {
             "NoteRename" => Ok(Action::Client(ClientAction::NoteRename)),
             "NoteCheck" => Ok(Action::Client(ClientAction::NoteCheck)),
             "NoteRePush" => Ok(Action::Client(ClientAction::NoteRePush)),
+            "NoteSyncPageAck" => Ok(Action::Client(ClientAction::NoteSyncPageAck)),
             "FileSync" => Ok(Action::Client(ClientAction::FileSync)),
             "FileUploadCheck" => Ok(Action::Client(ClientAction::FileUploadCheck)),
             "FileDelete" => Ok(Action::Client(ClientAction::FileDelete)),
             "FileChunkDownload" => Ok(Action::Client(ClientAction::FileChunkDownload)),
+            "FileSyncPageAck" => Ok(Action::Client(ClientAction::FileSyncPageAck)),
             "FolderSync" => Ok(Action::Client(ClientAction::FolderSync)),
             "FolderModify" => Ok(Action::Client(ClientAction::FolderModify)),
             "FolderDelete" => Ok(Action::Client(ClientAction::FolderDelete)),
             "FolderRename" => Ok(Action::Client(ClientAction::FolderRename)),
+            "FolderSyncPageAck" => Ok(Action::Client(ClientAction::FolderSyncPageAck)),
             "SettingSync" => Ok(Action::Client(ClientAction::SettingSync)),
             "SettingModify" => Ok(Action::Client(ClientAction::SettingModify)),
             "SettingDelete" => Ok(Action::Client(ClientAction::SettingDelete)),
+            "SettingSyncPageAck" => Ok(Action::Client(ClientAction::SettingSyncPageAck)),
             "NoteSyncEnd" => Ok(Action::Server(ServerAction::NoteSyncEnd)),
             "NoteSyncModify" => Ok(Action::Server(ServerAction::NoteSyncModify)),
             "NoteSyncDelete" => Ok(Action::Server(ServerAction::NoteSyncDelete)),
@@ -204,6 +222,7 @@ impl std::str::FromStr for Action {
             "NoteModifyAck" => Ok(Action::Server(ServerAction::NoteModifyAck)),
             "NoteDeleteAck" => Ok(Action::Server(ServerAction::NoteDeleteAck)),
             "NoteSyncAck" => Ok(Action::Server(ServerAction::NoteSyncAck)),
+            "NoteSyncPage" => Ok(Action::Server(ServerAction::NoteSyncPage)),
             "FileSyncUpdate" => Ok(Action::Server(ServerAction::FileSyncUpdate)),
             "FileSyncDelete" => Ok(Action::Server(ServerAction::FileSyncDelete)),
             "FileSyncRename" => Ok(Action::Server(ServerAction::FileSyncRename)),
@@ -213,6 +232,7 @@ impl std::str::FromStr for Action {
             "FileUploadAck" => Ok(Action::Server(ServerAction::FileUploadAck)),
             "FileDeleteAck" => Ok(Action::Server(ServerAction::FileDeleteAck)),
             "FileSyncAck" => Ok(Action::Server(ServerAction::FileSyncAck)),
+            "FileSyncPage" => Ok(Action::Server(ServerAction::FileSyncPage)),
             "FileSyncEnd" => Ok(Action::Server(ServerAction::FileSyncEnd)),
             "SettingSyncModify" => Ok(Action::Server(ServerAction::SettingSyncModify)),
             "SettingSyncDelete" => Ok(Action::Server(ServerAction::SettingSyncDelete)),
@@ -220,6 +240,7 @@ impl std::str::FromStr for Action {
             "SettingSyncMtime" => Ok(Action::Server(ServerAction::SettingSyncMtime)),
             "SettingSyncNeedUpload" => Ok(Action::Server(ServerAction::SettingSyncNeedUpload)),
             "SettingSyncAck" => Ok(Action::Server(ServerAction::SettingSyncAck)),
+            "SettingSyncPage" => Ok(Action::Server(ServerAction::SettingSyncPage)),
             "SettingSyncEnd" => Ok(Action::Server(ServerAction::SettingSyncEnd)),
             "SettingModifyAck" => Ok(Action::Server(ServerAction::SettingModifyAck)),
             "FolderSyncModify" => Ok(Action::Server(ServerAction::FolderSyncModify)),
@@ -690,6 +711,33 @@ pub struct SettingSyncEndMessage {
     pub need_delete_count: i64,
     #[serde(default)]
     pub messages: Vec<QueuedMessage>,
+}
+
+// ── Page Sync DTOs ──────────────────────────────────────────────────────
+
+/// Client->server page ack request (used for NoteSyncPageAck, FileSyncPageAck, etc.)
+/// pageIndex: -1 = first pull (request page 0), then 0, 1, 2, ... to ack each page.
+/// Last page needs no ack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPageAckRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    pub vault: String,
+    #[serde(rename = "pageIndex")]
+    pub page_index: i32,
+}
+
+/// Server->client page control message (sent before each page's detail messages)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncPageMessage {
+    #[serde(rename = "pageIndex")]
+    pub page_index: i32,
+    #[serde(rename = "pageSize")]
+    pub page_size: i32,
+    #[serde(rename = "totalCount", default)]
+    pub total_count: i32,
+    #[serde(rename = "isLast")]
+    pub is_last: bool,
 }
 
 // ── Binary frame helpers ────────────────────────────────────────────────

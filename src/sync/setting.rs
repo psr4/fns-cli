@@ -16,7 +16,10 @@ use tracing::{debug, info, warn};
 
 use crate::error::FnsError;
 use crate::hash::{hash_content, hash_path};
-use crate::protocol::{Action, ClientAction, SettingSyncCheck, SettingSyncRequest, encode_message};
+use crate::protocol::{
+    Action, ClientAction, SettingSyncCheck, SettingSyncRequest, SyncPageAckRequest,
+    SyncPageMessage, encode_message,
+};
 use crate::ws_client::WsStream;
 
 /// Marker for deleted files in echo cache
@@ -65,6 +68,14 @@ pub struct SettingSync {
     got_end: bool,
     /// Pending last sync time to commit
     pending_last_time: i64,
+    sync_context: Option<String>,
+    page_active: bool,
+    page_index: i32,
+    page_total: usize,
+    page_received: usize,
+    page_is_last: bool,
+    paging_started: bool,
+    page_last_seen: bool,
 }
 
 impl SettingSync {
@@ -93,12 +104,88 @@ impl SettingSync {
             pending_uploads: HashSet::new(),
             got_end: false,
             pending_last_time: 0,
+            sync_context: None,
+            page_active: false,
+            page_index: 0,
+            page_total: 0,
+            page_received: 0,
+            page_is_last: false,
+            paging_started: false,
+            page_last_seen: false,
         }
     }
 
     /// Check if sync is complete
     pub fn is_sync_complete(&self) -> bool {
         self.sync_complete
+    }
+
+    pub fn mark_page_message(&mut self) {
+        if self.page_active {
+            self.page_received += 1;
+        }
+    }
+
+    pub fn handle_setting_page(&mut self, msg: &serde_json::Value) -> Result<(), FnsError> {
+        let page: SyncPageMessage = serde_json::from_value(extract_inner(msg).clone())?;
+
+        self.page_active = true;
+        self.page_index = page.page_index;
+        self.page_total = page.total_count.max(0) as usize;
+        self.page_received = 0;
+        self.page_is_last = page.is_last;
+
+        debug!(
+            page_index = self.page_index,
+            page_size = page.page_size,
+            total_count = self.page_total,
+            is_last = self.page_is_last,
+            "<- SettingSyncPage"
+        );
+
+        Ok(())
+    }
+
+    pub async fn finish_page_if_needed(&mut self, ws: &mut WsStream) -> Result<(), FnsError> {
+        if !self.page_active || self.page_received < self.page_total {
+            return Ok(());
+        }
+
+        let page_index = self.page_index;
+        let is_last = self.page_is_last;
+        self.page_active = false;
+        self.page_total = 0;
+        self.page_received = 0;
+
+        if is_last {
+            self.page_last_seen = true;
+            self.check_all_received();
+        } else {
+            self.send_page_ack(ws, page_index).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn send_page_ack(
+        &mut self,
+        ws: &mut WsStream,
+        page_index: i32,
+    ) -> Result<(), FnsError> {
+        self.paging_started = true;
+        let request = SyncPageAckRequest {
+            context: self.sync_context.clone(),
+            vault: self.vault.clone(),
+            page_index,
+        };
+        let msg = encode_message(&Action::Client(ClientAction::SettingSyncPageAck), &request)?;
+
+        debug!(page_index, "-> SettingSyncPageAck");
+        ws.send(Message::Text(msg.into()))
+            .await
+            .map_err(|e| FnsError::WebSocket {
+                message: format!("Failed to send SettingSyncPageAck: {}", e),
+            })
     }
 
     /// Send incremental SettingSync request
@@ -111,6 +198,7 @@ impl SettingSync {
 
         let settings = self.collect_local_settings()?;
         let context = uuid::Uuid::new_v4().to_string();
+        self.sync_context = Some(context.clone());
 
         let request = SettingSyncRequest {
             vault: self.vault.clone(),
@@ -142,6 +230,7 @@ impl SettingSync {
 
         let settings = self.collect_local_settings()?;
         let context = uuid::Uuid::new_v4().to_string();
+        self.sync_context = Some(context.clone());
 
         let request = SettingSyncRequest {
             vault: self.vault.clone(),
@@ -297,6 +386,16 @@ impl SettingSync {
             return Ok(());
         }
 
+        if self.is_excluded(&rel_path) {
+            debug!(
+                path = rel_path,
+                "SettingSyncModify ignored for excluded path"
+            );
+            self.received_modify += 1;
+            self.check_all_received();
+            return Ok(());
+        }
+
         // Clear any stale __deleted__ marker from previous deletions
         if self.echo_hashes.get(&rel_path) == Some(&DELETED_MARKER.to_string()) {
             self.echo_hashes.remove(&rel_path);
@@ -341,6 +440,16 @@ impl SettingSync {
             .to_string();
 
         if rel_path.is_empty() {
+            return Ok(());
+        }
+
+        if self.is_excluded(&rel_path) {
+            debug!(
+                path = rel_path,
+                "SettingSyncDelete ignored for excluded path"
+            );
+            self.received_delete += 1;
+            self.check_all_received();
             return Ok(());
         }
 
@@ -437,6 +546,16 @@ impl SettingSync {
             return Ok(());
         }
 
+        if self.is_excluded(&rel_path) {
+            debug!(
+                path = rel_path,
+                "SettingSyncMtime ignored for excluded path"
+            );
+            self.received_mtime += 1;
+            self.check_all_received();
+            return Ok(());
+        }
+
         let full_path = self.vault_path.join(&rel_path);
 
         if full_path.exists() {
@@ -486,6 +605,15 @@ impl SettingSync {
 
         for rel_path in paths {
             if !rel_path.is_empty() {
+                if self.is_excluded(&rel_path) {
+                    debug!(
+                        path = rel_path,
+                        "SettingSyncNeedUpload ignored for excluded path"
+                    );
+                    self.received_upload += 1;
+                    continue;
+                }
+
                 let full_path = self.vault_path.join(&rel_path);
                 if full_path.exists() && Self::is_text_file(&full_path) {
                     self.pending_uploads.insert(rel_path.clone());
@@ -691,6 +819,10 @@ impl SettingSync {
         if rel == ".fns_state.json" {
             return true;
         }
+        // Exclude plugin chunk indexes generated for temporary upload sessions.
+        if rel == ".index/chunks.json" || rel.starts_with(".index/") {
+            return true;
+        }
         // Exclude plugin temp chunk files generated during uploads
         if rel.contains("/temp-chunks/") || rel.contains("/temp-chunks") {
             return true;
@@ -718,6 +850,14 @@ impl SettingSync {
         self.received_mtime = 0;
         self.pending_uploads.clear();
         self.pending_last_time = 0;
+        self.sync_context = None;
+        self.page_active = false;
+        self.page_index = 0;
+        self.page_total = 0;
+        self.page_received = 0;
+        self.page_is_last = false;
+        self.paging_started = false;
+        self.page_last_seen = false;
     }
 
     /// Check if all expected messages received
@@ -736,6 +876,9 @@ impl SettingSync {
             + self.received_mtime;
 
         if total_received >= total_expected {
+            if total_expected > 0 && self.paging_started && !self.page_last_seen {
+                return;
+            }
             info!(
                 modify = self.received_modify,
                 delete = self.received_delete,
@@ -900,6 +1043,7 @@ mod tests {
 
         assert!(sync.is_excluded(".git/config"));
         assert!(sync.is_excluded(".trash/old.md"));
+        assert!(sync.is_excluded(".index/chunks.json"));
         assert!(sync.is_excluded(".obsidian/plugins/fast-note-sync/temp-chunks/uuid/0.bin"));
         assert!(!sync.is_excluded(".obsidian/app.json"));
         assert!(!sync.is_excluded("notes/hello.md"));
